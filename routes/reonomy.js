@@ -91,7 +91,7 @@ async function propertyList(req, res) {
   const ownerType = body.owner_type === 'Company' ? 'Company'
                  : body.owner_type === 'Person'  ? 'Person'
                  : null;
-  const requirePhone = body.require_phone !== false;
+  const requirePhone = body.require_phone === true; // default OFF while UI tuning
 
   const page = await newPage('reonomy');
   try {
@@ -141,7 +141,10 @@ async function propertyList(req, res) {
         await humanDelay(200, 500);
       }
       if (requirePhone) {
-        await page.locator('button:has-text("Includes Phone Number")').first().click();
+        // The pill button is inside a section labeled "Owner Contact Information".
+        // Use case-insensitive contains + broader locator so a small text change won't break us.
+        const phoneBtn = page.locator('button', { hasText: /phone/i }).first();
+        await phoneBtn.click({ timeout: 8000 }).catch(() => {});
         await humanDelay(200, 500);
       }
     }
