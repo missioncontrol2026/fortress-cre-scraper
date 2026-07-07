@@ -276,13 +276,14 @@ async function loginCostar(req, res) {
 
   const page = await newPage('costar');
   try {
-    // CoStar's login lives at https://product.costar.com; unauthenticated hits redirect here.
-    await page.goto('https://product.costar.com/', { waitUntil: 'domcontentloaded' });
+    // CoStar SSO is at secure.costargroup.com. Unauthenticated visitors to product.costar.com
+    // are redirected here for login.
+    await page.goto('https://secure.costargroup.com/login', { waitUntil: 'domcontentloaded' });
     await humanDelay(1500, 2500);
 
     // Email/username field appears first; then password (Auth0-style step). Both variants supported.
-    await page.waitForSelector('input[name="username"], input[name="email"], input[type="email"]', { timeout: 30000 });
-    await page.fill('input[name="username"], input[name="email"], input[type="email"]', email);
+    await page.waitForSelector('input[name="username"], input[name="email"], input[type="email"], input[id*="user"], input[id*="email"]', { timeout: 30000 });
+    await page.fill('input[name="username"], input[name="email"], input[type="email"], input[id*="user"], input[id*="email"]', email);
     await humanDelay(400, 900);
 
     // Some CoStar tenants require clicking "Continue" before password appears.
