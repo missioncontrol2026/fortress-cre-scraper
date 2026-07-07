@@ -1,0 +1,48 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Fortress Reonomy Scraper",
+    "description": "Reproduces MC Reonomy workflows R1 (industrial property list builder for Agent 2) and R2 (per-property owner skip-trace). Feeds Call Tools bulk CSV and Salesforce Lead upserts. Mason's immutable filters (15k+ SF industrial only, exclude self-storage/strip/hotel/office) enforced server-side.",
+    "version": "1.0.0"
+  },
+  "servers": [ { "url": "https://fortress-cre-scraper.onrender.com" } ],
+  "paths": {
+    "/reonomy/property-list": {
+      "post": {
+        "operationId": "reonomyPropertyList",
+        "summary": "Build an industrial property list matching Mason's criteria. Auto-applies exclude_keywords and dedupes against a CK call list if provided. Output rows map directly to Call Tools CSV (first_name,last_name,company,address,city,state,zip,phone) and Salesforce Lead (Company=owner, Record Type=Fortress Industrial, CK_List_Origin__c=campaign tag).",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": {
+          "type": "object",
+          "required": ["property_types","geography"],
+          "properties": {
+            "property_types": { "type": "array", "items": { "type": "string", "enum": ["Industrial - Warehouse","Industrial - Flex","Industrial - Manufacturing"] }, "description": "Only industrial subtypes allowed per Mason spec." },
+            "min_size_sf":    { "type": "number", "default": 15000, "description": "Immutable 15k floor per Mason. User may raise for tighter list." },
+            "geography":      { "type": "array", "description": "Counties or cities. Example: [{county:'Davidson',state:'TN'},{county:'Williamson',state:'TN'}]", "items": { "type": "object", "properties": { "county": {"type":"string"}, "city": {"type":"string"}, "state": {"type":"string"} } } },
+            "owner_type":     { "type": "string", "enum": ["private","any"], "default": "private" },
+            "min_years_owned":{ "type": "number", "default": 10 },
+            "exclude_keywords":{ "type": "array", "items": {"type":"string"}, "default": ["self-storage","strip","hotel","office","mixed-use"] },
+            "dedupe_against": { "type": "array", "description": "Optional CK list rows { phone, address, entity } for dedupe. Rows tagged _dupe=true are excluded from new_count.", "items": { "type": "object", "properties": { "phone":{"type":"string"}, "address":{"type":"string"}, "entity":{"type":"string"} } } }
+          }
+        } } } },
+        "responses": { "200": { "description": ".count total, .new_count after dedupe, .rows[] with property_name/address/city/state/size_sf/property_type/owner/years_owned/owner_phone/owner_email/_dupe/_dupeReason" } }
+      }
+    },
+    "/reonomy/owner-detail": {
+      "post": {
+        "operationId": "reonomyOwnerDetail",
+        "summary": "Per-property owner skip-trace. Run for each R1 row whose owner_phone+owner_email are empty. Returns status ∈ {FOUND, MAIL_ONLY, SOS_NEEDED, NOT_FOUND}. FOUND→append phone to Call Tools CSV. MAIL_ONLY→mail campaign bucket. SOS_NEEDED→drives Google Secretary of State workflow (search /searxng with query \\\"[entity] LLC [state] secretary of state\\\").",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": {
+          "type": "object",
+          "required": ["owner_name"],
+          "properties": {
+            "owner_name":       { "type": "string" },
+            "property_address": { "type": "string" }
+          }
+        } } } },
+        "responses": { "200": { "description": ".status, .phone, .email, .mailing_address, .entity_type" } }
+      }
+    }
+  },
+  "components": { "securitySchemes": { "BearerAuth": { "type": "http", "scheme": "bearer" } } },
+  "security": [ { "BearerAuth": [] } ]
+}

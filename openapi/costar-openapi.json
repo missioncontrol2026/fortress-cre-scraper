@@ -1,0 +1,80 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Fortress CoStar Scraper",
+    "description": "Reproduces MC CoStar workflows C1 (buyer search), C2 (top-5 reverse wholesale), C3 (national buyers), C4 (comps), C5/C6/C7 (property lookup / listing status / property-type confirm). Static Bearer auth via proxy service. All searches cost against the 500/month CoStar export cap; check /quota before large runs. Coordinate with Brent Kakwitch on 2FA before first use each session.",
+    "version": "1.0.0"
+  },
+  "servers": [
+    { "url": "https://fortress-cre-scraper.onrender.com" }
+  ],
+  "paths": {
+    "/costar/buyer-search": {
+      "post": {
+        "operationId": "costarBuyerSearch",
+        "summary": "Comparable-buyer search. mode=full for Under Contract full research (C1, 5-10 exports). mode=top5 for Opp Stage 2+ pre-marketing shortlist (C2, 1-2 exports, radius drops to 25mi and date to 18mo). mode=national for Phase 3 national buyer discovery (C3, no radius, min portfolio 3). Auto-excludes REIT/government/non-profit/institutional. Feeds Interested_Buyers junction CSV in Salesforce with Source__c='CoStar_Buyer_Search'.",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": {
+            "type": "object",
+            "required": ["property_type","subject_size_sf","subject_address"],
+            "properties": {
+              "property_type":         { "type": "string", "description": "Industrial Warehouse | Industrial Flex | Industrial Manufacturing" },
+              "subject_size_sf":       { "type": "number", "description": "Size of subject property in SF; used with multiplier for size band" },
+              "subject_address":       { "type": "string", "description": "Full address; used for radius geo filter" },
+              "size_multiplier_low":   { "type": "number", "default": 0.7 },
+              "size_multiplier_high":  { "type": "number", "default": 1.5 },
+              "radius_miles":          { "type": "number", "default": 50 },
+              "months_back":           { "type": "number", "default": 24 },
+              "exclude":               { "type": "array", "items": { "type": "string" }, "default": ["REIT","government","non-profit","institutional"] },
+              "result_limit":          { "type": "number", "default": 50 },
+              "mode":                  { "type": "string", "enum": ["full","top5","national"], "default": "full" }
+            }
+          } } }
+        },
+        "responses": { "200": { "description": "Returns rows[] with entity_name/entity_type/principal_name/purchase_address/purchase_date/purchase_size_sf/purchase_price + quota_usage." } }
+      }
+    },
+    "/costar/comps": {
+      "post": {
+        "operationId": "costarComps",
+        "summary": "Sales + lease comps for underwriting brief (C4). Runs at Opp Stage 1-2. Costs ~2-3 exports per call.",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": {
+            "type": "object",
+            "required": ["subject_address","property_type"],
+            "properties": {
+              "subject_address": { "type": "string" },
+              "property_type":   { "type": "string" },
+              "radius_miles":    { "type": "number", "default": 5 },
+              "months_back":     { "type": "number", "default": 18 },
+              "sales_limit":     { "type": "number", "default": 5 },
+              "leases_limit":    { "type": "number", "default": 5 }
+            }
+          } } }
+        },
+        "responses": { "200": { "description": ".sales[] and .leases[] each with comp_address/price/price_per_sf/date/size_sf; leases add rent_per_sf/lease_type." } }
+      }
+    },
+    "/costar/property": {
+      "get": {
+        "operationId": "costarPropertyLookup",
+        "summary": "Property lookup — covers C5 (photo URL for OM), C6 (90-day listing re-check for LT-FU leads: returns listing_status + broker_name), and C7 (Agent 1 authoritative property-type/occupancy/cap-rate confirmation). No export consumed.",
+        "parameters": [
+          { "name": "address", "in": "query", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": { "200": { "description": "property_url, property_type, size_sf, occupancy, cap_rate, listing_status, broker_name, broker_contact, photo_url." } }
+      }
+    },
+    "/quota": {
+      "get": {
+        "operationId": "costarQuota",
+        "summary": "Check current CoStar + Reonomy usage against limits. Call before any large run to avoid burning the monthly cap.",
+        "responses": { "200": { "description": "{ costar: { limits, usage }, reonomy: { limits, usage } }" } }
+      }
+    }
+  },
+  "components": { "securitySchemes": { "BearerAuth": { "type": "http", "scheme": "bearer" } } },
+  "security": [ { "BearerAuth": [] } ]
+}

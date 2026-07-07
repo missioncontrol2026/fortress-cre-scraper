@@ -1,0 +1,24 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Fortress Search (SearXNG)",
+    "description": "Self-hosted SearXNG meta-search. Free upstream to Google/Bing/DuckDuckGo. Covers MC workflows: G1 quoted-address off-market search (Agent 1), G2 LoopNet Firsthand listing verification (Agent 1+2), G3 Secretary of State entity lookup (Agent 3+2), G4 state/county assessor lookup (Agent 1+5), G5 public records / deed change detection (Agent 1+8).\n\nQuery patterns:\n- G1: q=\"[full address]\"\n- G2: q=site:loopnet.com \"[address]\"\n- G3: q=\"[entity] LLC\" \"[state]\" secretary of state\n- G4: q=\"[city] [state] property assessor\" OR q=\"[county] county [state] property records\"\n- G5: q=\"[address]\" deed OR recorder OR \"grant deed\"\n\nCritical G2 rule: a LoopNet result page is only 'listed' if it shows a current broker contact + live price. Stale/expired pages are NOT listed (per Fortress false-positive discipline).",
+    "version": "1.0.0"
+  },
+  "servers": [ { "url": "https://fortress-searxng.onrender.com" } ],
+  "paths": {
+    "/search": {
+      "get": {
+        "operationId": "webSearch",
+        "summary": "Meta-search across Google/Bing/DuckDuckGo. Returns JSON results. Prefer quoted-address queries for property lookups.",
+        "parameters": [
+          { "name": "q",        "in": "query", "required": true, "schema": { "type": "string" }, "description": "Query string. Always quote full addresses." },
+          { "name": "format",   "in": "query", "required": true, "schema": { "type": "string", "enum": ["json"], "default": "json" } },
+          { "name": "categories","in": "query", "required": false, "schema": { "type": "string", "default": "general" } },
+          { "name": "pageno",   "in": "query", "required": false, "schema": { "type": "integer", "default": 1, "minimum": 1, "maximum": 5 } }
+        ],
+        "responses": { "200": { "description": ".results[] each { url, title, content (snippet), engine }. .infoboxes[] for structured entity data." } }
+      }
+    }
+  }
+}

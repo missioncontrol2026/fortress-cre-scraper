@@ -1,0 +1,14 @@
+{
+  "name": "fortress-cre-scraper",
+  "version": "1.0.0",
+  "description": "Playwright-based scraper service for CoStar + Reonomy — reproduces all 14 Mission Control CRE research workflows. Auth via static PROXY_API_KEY (LibreChat Bearer).",
+  "main": "server.js",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "start": "node server.js",
+    "postinstall": "npx playwright install --with-deps chromium"
+  },
+  "dependencies": {
+    "playwright": "^1.48.0"
+  }
+}
