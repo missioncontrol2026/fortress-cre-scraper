@@ -97,15 +97,23 @@ async function propertyList(req, res) {
   try {
     await ensureLogin(page);
 
-    // 1. Go to search — Reonomy's SPA hash routing lives under /!/search
+    // 1. Go to search — Reonomy SPA lives under hash routing. Try the direct search URL,
+    // then fall back to clicking "Advanced Search" from the home page if the SPA landed there.
     await page.goto(`${REONOMY_BASE}/!/search`, { waitUntil: 'domcontentloaded' });
-    // Wait for the app shell to mount and the results counter or map to appear.
     await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {});
-    await humanDelay(2000, 3500);
+    await humanDelay(2500, 4000);
+
+    // If we landed on /!/home instead of /!/search (SPA sometimes redirects), click Advanced Search.
+    const advSearch = page.locator('text=/Advanced Search/i').first();
+    if (await advSearch.isVisible().catch(() => false)) {
+      await advSearch.click();
+      await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
+      await humanDelay(1500, 2500);
+    }
 
     // 2. Open the More Filters modal — wait patiently, the button renders after the SPA hydrates.
     const moreFilters = page.locator('button:has-text("More Filters")').first();
-    await moreFilters.waitFor({ state: 'visible', timeout: 30000 });
+    await moreFilters.waitFor({ state: 'visible', timeout: 45000 });
     await moreFilters.click();
     await humanDelay(700, 1200);
 
