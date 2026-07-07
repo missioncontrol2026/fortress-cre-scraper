@@ -273,24 +273,49 @@ async function loginCostar(req, res) {
   const password = process.env.COSTAR_PASSWORD;
   const code     = (req.body || {}).code;
   if (!email || !password) return res.status(500).json({ error: 'COSTAR_EMAIL/PASSWORD not set' });
-  if (!code) return res.status(400).json({ error: 'body.code (2FA) required' });
 
   const page = await newPage('costar');
   try {
-    await page.goto('https://www.costar.com/login', { waitUntil: 'domcontentloaded' }); // TUNE
-    await humanDelay();
-    await page.fill('input[name="username"], input[type="email"]', email); // TUNE
-    await page.fill('input[name="password"], input[type="password"]', password); // TUNE
-    await page.click('button[type="submit"]'); // TUNE
-    await page.waitForSelector('input[name="mfaCode"], input[name="code"], input[autocomplete="one-time-code"]', { timeout: 30000 }); // TUNE
-    await page.fill('input[autocomplete="one-time-code"], input[name="mfaCode"], input[name="code"]', code); // TUNE
-    await page.click('button[type="submit"]'); // TUNE
-    await page.waitForLoadState('networkidle', { timeout: 45000 });
+    // CoStar's login lives at https://product.costar.com; unauthenticated hits redirect here.
+    await page.goto('https://product.costar.com/', { waitUntil: 'domcontentloaded' });
+    await humanDelay(1500, 2500);
+
+    // Email/username field appears first; then password (Auth0-style step). Both variants supported.
+    await page.waitForSelector('input[name="username"], input[name="email"], input[type="email"]', { timeout: 30000 });
+    await page.fill('input[name="username"], input[name="email"], input[type="email"]', email);
+    await humanDelay(400, 900);
+
+    // Some CoStar tenants require clicking "Continue" before password appears.
+    const cont = page.locator('button:has-text("Continue"), button:has-text("Next")').first();
+    if (await cont.isVisible().catch(() => false)) {
+      await cont.click();
+      await humanDelay(600, 1200);
+    }
+
+    await page.waitForSelector('input[name="password"], input[type="password"]', { timeout: 15000 });
+    await page.fill('input[name="password"], input[type="password"]', password);
+    await humanDelay(400, 900);
+
+    await page.click('button[type="submit"], button:has-text("Sign In"), button:has-text("Log In")');
+    await humanDelay(2000, 3500);
+
+    // If a 2FA prompt appears AND we have a code, fill it. Otherwise proceed (no-2FA seats).
+    const mfaField = page.locator('input[autocomplete="one-time-code"], input[name="mfaCode"], input[name="code"]').first();
+    if (await mfaField.isVisible({ timeout: 5000 }).catch(() => false)) {
+      if (!code) {
+        throw new Error('CoStar asked for a 2FA code but none was provided. POST with body {"code":"XXXXXX"}');
+      }
+      await mfaField.fill(code);
+      await page.click('button[type="submit"], button:has-text("Verify")');
+    }
+
+    await page.waitForLoadState('networkidle', { timeout: 60000 }).catch(() => {});
+    await humanDelay(1500, 2500);
     await saveState('costar');
-    res.json({ ok: true, message: 'CoStar session refreshed' });
+    res.json({ ok: true, message: 'CoStar session established', url: page.url() });
   } catch (err) {
     console.error('login error:', err);
-    res.status(500).json({ error: 'login_failed', message: err.message });
+    res.status(500).json({ error: 'login_failed', message: err.message, url: page.url() });
   } finally {
     await page.close().catch(() => {});
   }
