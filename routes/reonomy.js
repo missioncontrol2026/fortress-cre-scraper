@@ -61,13 +61,13 @@ async function checkboxByLabel(page, text) {
   await humanDelay(200, 500);
 }
 
-// Click a tab (top-level "Property Type / Building & Lot / Owner ..." or sub-tab
-// "Commercial / Industrial / Multifamily / ..."). Both are just spans with text.
+// Click a MUI tab. Top-level ("Property Type", "Building & Lot", "Owner", ...) and
+// sub-tabs ("Commercial", "Industrial", ...) all have role="tab" in Reonomy's DOM.
 async function clickTab(page, text) {
-  const tab = page.locator(`text="${text}"`).first();
+  const tab = page.getByRole('tab', { name: text, exact: true }).first();
   await tab.waitFor({ state: 'visible', timeout: 10000 });
   await tab.click();
-  await humanDelay(500, 900);
+  await humanDelay(600, 1200);
 }
 
 // ---------- Workflow R1 ----------
@@ -133,18 +133,20 @@ async function propertyList(req, res) {
       await humanDelay(300, 700);
     }
 
-    // 5. Owner tab → Owner Type + Contact Info
+    // 5. Owner tab → Owner Type + Contact Info. Owner-type toggle buttons live inside
+    // the Owner tab panel; scope the button lookup so it doesn't clash with other tabs.
     if (ownerType || requirePhone) {
       await clickTab(page, 'Owner');
+      await humanDelay(600, 1000);
+      const ownerPanel = page.locator('[role="tabpanel"]').filter({ hasText: 'Owner Type' }).first();
       if (ownerType) {
-        await page.locator(`button:has-text("${ownerType}")`).first().click();
+        await ownerPanel.locator('button', { hasText: new RegExp(`^${ownerType}$`) })
+          .first().click({ timeout: 8000 }).catch(() => {});
         await humanDelay(200, 500);
       }
       if (requirePhone) {
-        // The pill button is inside a section labeled "Owner Contact Information".
-        // Use case-insensitive contains + broader locator so a small text change won't break us.
-        const phoneBtn = page.locator('button', { hasText: /phone/i }).first();
-        await phoneBtn.click({ timeout: 8000 }).catch(() => {});
+        await ownerPanel.locator('button', { hasText: /phone/i })
+          .first().click({ timeout: 8000 }).catch(() => {});
         await humanDelay(200, 500);
       }
     }
