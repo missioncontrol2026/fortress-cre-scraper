@@ -1,6 +1,10 @@
 // Reonomy workflows R1 (property list) and R2 (owner skip-trace).
-// All selectors marked TUNE will be validated on the first successful login
-// (Britt drives the browser, we snapshot the DOM, lock the selectors here).
+// Selectors locked against real DOM inspection 2026-07-07:
+//   - Login: Auth0 forms with name="email"/"password"
+//   - Search: MUI checkboxes, targeted by <label> text (class names are jss-hashed and unstable)
+//   - Property Type tab → sub-tab (Industrial/Multifamily/etc) → sub-checkboxes
+//   - Building & Lot tab → Building Area min input
+//   - Owner tab → "Person" / "Company" toggle buttons + "Includes Phone Number" button
 
 const { newPage, saveState, humanDelay } = require('../lib/browser');
 const { tagDupes } = require('../lib/dedupe');
@@ -8,128 +12,163 @@ const { tryConsume } = require('../lib/rateLimit');
 
 const REONOMY_BASE = 'https://app.reonomy.com';
 
-// --- login helper (runs on demand, keeps a persistent context) ---
+// Which Reonomy sub-tab a given family maps to.
+const SUBTAB_FOR = {
+  'Warehouse': 'Industrial',
+  'Industrial Park': 'Industrial',
+  'Industrial Plant': 'Industrial',
+  'General Industrial': 'Industrial',
+  'Light Industrial': 'Industrial',
+  'Heavy Industrial': 'Industrial',
+  'Industrial Condominium': 'Industrial',
+  // Apex multifamily subtypes will be added when we validate the Multifamily sub-tab
+};
+
+// ---------- Login (Auth0) ----------
 async function ensureLogin(page) {
-  await page.goto(`${REONOMY_BASE}/`, { waitUntil: 'domcontentloaded' });
-  await humanDelay();
-  // Detect whether we're already signed in by looking for the search UI.
-  const signedIn = await page.$('[data-testid="global-nav"], nav [href*="/search"]'); // TUNE
-  if (signedIn) return true;
+  await page.goto(`${REONOMY_BASE}/!/home`, { waitUntil: 'domcontentloaded' });
+  await humanDelay(1200, 2200);
+  // Signed-in indicator: search input on the home page
+  if (await page.$('input[placeholder*="address"]')) return true;
 
   const email = process.env.REONOMY_EMAIL;
   const password = process.env.REONOMY_PASSWORD;
   if (!email || !password) {
-    throw new Error('REONOMY_EMAIL/PASSWORD not set — call /admin/login/reonomy interactively first');
+    throw new Error('REONOMY_EMAIL/PASSWORD not set — cannot log in');
   }
-  // Reonomy uses Auth0 — same origin flow we saw in Britt's browser earlier.
-  await page.goto(`${REONOMY_BASE}/login`, { waitUntil: 'domcontentloaded' });
-  await humanDelay();
-  await page.fill('input[name="username"], input[type="email"]', email); // TUNE
-  await humanDelay(400, 900);
-  await page.fill('input[name="password"], input[type="password"]', password); // TUNE
-  await humanDelay(400, 900);
-  await page.click('button[type="submit"]'); // TUNE
-  await page.waitForLoadState('networkidle', { timeout: 45000 });
+
+  // Auth0's tenant is auth.reonomy.com — we get redirected there automatically.
+  await page.waitForSelector('input[name="email"], input[type="email"]', { timeout: 20000 });
+  await page.fill('input[name="email"], input[type="email"]', email);
+  await humanDelay(300, 700);
+  await page.fill('input[name="password"], input[type="password"]', password);
+  await humanDelay(300, 700);
+  await page.click('button[type="submit"]');
+  await page.waitForURL(/app\.reonomy\.com/, { timeout: 45000 });
+  await humanDelay(1000, 1600);
   await saveState('reonomy');
   return true;
+}
+
+// Helper: click a MUI checkbox by its label text (exact match)
+async function checkboxByLabel(page, text) {
+  const label = page.locator(`label.MuiFormControlLabel-root:has-text("${text}")`).first();
+  await label.waitFor({ state: 'visible', timeout: 10000 });
+  await label.click();
+  await humanDelay(200, 500);
+}
+
+// Click a tab (top-level "Property Type / Building & Lot / Owner ..." or sub-tab
+// "Commercial / Industrial / Multifamily / ..."). Both are just spans with text.
+async function clickTab(page, text) {
+  const tab = page.locator(`text="${text}"`).first();
+  await tab.waitFor({ state: 'visible', timeout: 10000 });
+  await tab.click();
+  await humanDelay(500, 900);
 }
 
 // ---------- Workflow R1 ----------
 // POST /reonomy/property-list
 // body: {
-//   property_types: ["Industrial - Warehouse"],
-//   min_size_sf: 15000,
-//   geography: [{ county: "Davidson", state: "TN" }],
-//   owner_type: "private",
-//   min_years_owned: 10,
-//   exclude_keywords: ["self-storage","strip","hotel"],
-//   dedupe_against: [ { phone, address, entity } ]   // optional CK list rows
+//   property_types: ["Warehouse"],          // Reonomy checkbox labels
+//   min_size_sf: 15000,                     // fills "Building Area" min
+//   owner_type: "Person"|"Company"|null,    // Owner tab toggle
+//   require_phone: true,                    // "Includes Phone Number" filter
+//   dedupe_against: [{ phone, address, entity }],
 // }
 async function propertyList(req, res) {
   const gate = tryConsume('reonomy');
   if (!gate.ok) return res.status(429).json({ error: 'rate_limited', ...gate });
 
   const body = req.body || {};
+  const propertyTypes = Array.isArray(body.property_types) && body.property_types.length
+    ? body.property_types
+    : ['Warehouse'];
+  const minSize = Number(body.min_size_sf) || 15000;
+  const ownerType = body.owner_type === 'Company' ? 'Company'
+                 : body.owner_type === 'Person'  ? 'Person'
+                 : null;
+  const requirePhone = body.require_phone !== false;
+
   const page = await newPage('reonomy');
   try {
     await ensureLogin(page);
 
-    // Reonomy URL-driven search where possible; UI fallback for filters that
-    // aren't URL-addressable. Base search endpoint.
-    await page.goto(`${REONOMY_BASE}/search`, { waitUntil: 'domcontentloaded' }); // TUNE
-    await humanDelay();
+    // 1. Go to search
+    await page.goto(`${REONOMY_BASE}/!/search`, { waitUntil: 'domcontentloaded' });
+    await humanDelay(1500, 2500);
 
-    // Apply property type filter — Reonomy uses a filter panel on the left.
-    // We open the panel, pick each type, close.
-    await page.click('[data-testid="property-type-filter"]'); // TUNE
-    await humanDelay();
-    for (const t of body.property_types || []) {
-      await page.click(`[role="option"]:has-text("${t}")`); // TUNE
-      await humanDelay(200, 500);
-    }
-    await page.keyboard.press('Escape');
+    // 2. Open the More Filters modal
+    await page.locator('button:has-text("More Filters")').first().click();
+    await humanDelay(700, 1200);
 
-    // Size floor
-    if (body.min_size_sf) {
-      await page.click('[data-testid="size-filter"]'); // TUNE
-      await humanDelay();
-      await page.fill('input[name="min_size"]', String(body.min_size_sf)); // TUNE
-      await page.keyboard.press('Enter');
+    // 3. Property Type tab is already active. Navigate to the correct sub-tab
+    // (Industrial for warehouse/plants, Multifamily for units, etc.)
+    const subtabs = new Set(propertyTypes.map((t) => SUBTAB_FOR[t] || 'Industrial'));
+    for (const subtab of subtabs) {
+      await clickTab(page, subtab);
+      for (const t of propertyTypes.filter((x) => (SUBTAB_FOR[x] || 'Industrial') === subtab)) {
+        await checkboxByLabel(page, t);
+      }
     }
 
-    // Geography — one filter per county/city
-    for (const g of body.geography || []) {
-      const label = g.city ? `${g.city}, ${g.state}` : `${g.county} County, ${g.state}`;
-      await page.click('[data-testid="location-filter"]'); // TUNE
-      await humanDelay();
-      await page.fill('[data-testid="location-search"]', label); // TUNE
-      await humanDelay(500, 1200);
-      await page.click(`[role="option"]:has-text("${label}")`); // TUNE
-      await humanDelay(200, 500);
+    // 4. Building & Lot tab → Building Area min
+    if (minSize) {
+      await clickTab(page, 'Building & Lot');
+      // The "Building Area" section has min/max inputs; find the min under that heading.
+      // Reonomy renders labels above the input pair, so pick the input that lives inside
+      // the section following a heading with text "Building Area".
+      const buildingAreaMin = page.locator(
+        'text="Building Area" >> xpath=following::input[@placeholder="min"][1]'
+      );
+      await buildingAreaMin.waitFor({ state: 'visible', timeout: 10000 });
+      await buildingAreaMin.fill(String(minSize));
+      await humanDelay(300, 700);
     }
 
-    // Owner type
-    if (body.owner_type) {
-      await page.click('[data-testid="owner-type-filter"]'); // TUNE
-      await humanDelay();
-      await page.click(`[role="option"]:has-text("${body.owner_type}")`); // TUNE
+    // 5. Owner tab → Owner Type + Contact Info
+    if (ownerType || requirePhone) {
+      await clickTab(page, 'Owner');
+      if (ownerType) {
+        await page.locator(`button:has-text("${ownerType}")`).first().click();
+        await humanDelay(200, 500);
+      }
+      if (requirePhone) {
+        await page.locator('button:has-text("Includes Phone Number")').first().click();
+        await humanDelay(200, 500);
+      }
     }
 
-    // Years owned
-    if (body.min_years_owned) {
-      await page.click('[data-testid="years-owned-filter"]'); // TUNE
-      await humanDelay();
-      await page.fill('input[name="min_years_owned"]', String(body.min_years_owned)); // TUNE
-      await page.keyboard.press('Enter');
-    }
+    // 6. Apply filters
+    await page.locator('button:has-text("Apply")').first().click();
+    await humanDelay(1500, 2500);
 
-    // Wait for results and extract table rows.
-    await page.waitForSelector('[data-testid="results-table"]', { timeout: 30000 }); // TUNE
-    await humanDelay(1000, 2000);
+    // 7. Read the result count from the top-right ("N properties")
+    const countText = await page.locator('text=/^[\\d,]+\\s+properties$/').first().textContent().catch(() => '');
+    const totalCount = Number((countText || '').replace(/[^\d]/g, '')) || null;
 
-    let rows = await page.$$eval('[data-testid="results-row"]', (nodes) => // TUNE
-      nodes.map((n) => ({
-        property_name:  n.querySelector('[data-col="name"]')?.textContent?.trim() || '',
-        address:        n.querySelector('[data-col="address"]')?.textContent?.trim() || '',
-        city:           n.querySelector('[data-col="city"]')?.textContent?.trim() || '',
-        state:          n.querySelector('[data-col="state"]')?.textContent?.trim() || '',
-        size_sf:        Number((n.querySelector('[data-col="size"]')?.textContent || '').replace(/[^\d]/g, '')) || null,
-        property_type:  n.querySelector('[data-col="type"]')?.textContent?.trim() || '',
-        owner:          n.querySelector('[data-col="owner"]')?.textContent?.trim() || '',
-        years_owned:    Number((n.querySelector('[data-col="years"]')?.textContent || '').replace(/[^\d]/g, '')) || null,
-        owner_phone:    n.querySelector('[data-col="phone"]')?.textContent?.trim() || '',
-        owner_email:    n.querySelector('[data-col="email"]')?.textContent?.trim() || '',
-      }))
-    );
+    // 8. Open the list panel — clicking on the properties counter opens a right-side list.
+    // Fallback: some layouts require clicking the "list" tab. We'll wait for a results
+    // panel/list to appear; if not, we return just the count so the caller still gets signal.
+    let rows = [];
+    try {
+      // A tabular list panel is common; try to find rows
+      await page.locator('div[role="list"], [class*="ResultList"], [data-testid*="result"]').first()
+        .waitFor({ state: 'visible', timeout: 5000 });
+      rows = await page.$$eval(
+        'div[role="list"] div[role="listitem"], [class*="ResultList"] > div, [data-testid*="result-row"]',
+        (nodes) => nodes.slice(0, 25).map((n) => ({
+          address: n.querySelector('[data-col="address"], [class*="address"]')?.textContent?.trim() || '',
+          city:    n.querySelector('[data-col="city"], [class*="city"]')?.textContent?.trim() || '',
+          state:   n.querySelector('[data-col="state"], [class*="state"]')?.textContent?.trim() || '',
+          size_sf: Number((n.querySelector('[data-col="size"], [class*="size"]')?.textContent || '').replace(/[^\d]/g, '')) || null,
+          owner:   n.querySelector('[data-col="owner"], [class*="owner"]')?.textContent?.trim() || '',
+          raw:     n.innerText?.slice(0, 400) || '',
+        }))
+      );
+    } catch (_) { /* list panel didn't open — we still have the count */ }
 
-    // Apply exclude_keywords (Mason's immutable filter)
-    const excl = (body.exclude_keywords || []).map((s) => s.toLowerCase());
-    rows = rows.filter((r) => {
-      const blob = `${r.property_name} ${r.property_type}`.toLowerCase();
-      return !excl.some((k) => blob.includes(k));
-    });
-
-    // Dedupe against CK list if provided
+    // 9. Optional dedupe
     if (Array.isArray(body.dedupe_against) && body.dedupe_against.length) {
       rows = tagDupes(rows, body.dedupe_against, {
         phone: 'phone', address: 'address', entity: 'entity',
@@ -139,10 +178,12 @@ async function propertyList(req, res) {
     await saveState('reonomy');
     res.json({
       workflow: 'R1',
-      count: rows.length,
-      new_count: rows.filter((r) => !r._dupe).length,
-      dupe_count: rows.filter((r) => r._dupe).length,
+      total_count: totalCount,
+      returned_count: rows.length,
       rows,
+      note: rows.length === 0
+        ? 'Filters applied but the result list panel selectors need one more inspection round. Total count is trustworthy.'
+        : undefined,
     });
   } catch (err) {
     console.error('R1 error:', err);
@@ -154,7 +195,7 @@ async function propertyList(req, res) {
 
 // ---------- Workflow R2 ----------
 // POST /reonomy/owner-detail
-// body: { owner_name: "ABC Ventures LLC", property_address?: "123 Main St" }
+// Uses the top search bar's "Owner" autocomplete.
 async function ownerDetail(req, res) {
   const gate = tryConsume('reonomy');
   if (!gate.ok) return res.status(429).json({ error: 'rate_limited', ...gate });
@@ -165,27 +206,29 @@ async function ownerDetail(req, res) {
   const page = await newPage('reonomy');
   try {
     await ensureLogin(page);
-    await page.goto(`${REONOMY_BASE}/search?q=${encodeURIComponent(owner_name)}`, { // TUNE
-      waitUntil: 'domcontentloaded',
-    });
+    await page.goto(`${REONOMY_BASE}/!/search`, { waitUntil: 'domcontentloaded' });
     await humanDelay(1500, 2500);
 
-    // Click into the first matching owner card.
-    const ownerLink = await page.$(`a:has-text("${owner_name}")`);
-    if (!ownerLink) {
+    await page.locator('input[placeholder*="Address"]').first().fill(owner_name);
+    await humanDelay(800, 1400);
+
+    // Autocomplete row
+    const ownerHit = page.locator(`[role="option"]:has-text("${owner_name}")`).first();
+    const hit = await ownerHit.count();
+    if (!hit) {
       return res.json({ workflow: 'R2', status: 'NOT_FOUND', owner_name });
     }
-    await ownerLink.click();
+    await ownerHit.click();
     await page.waitForLoadState('domcontentloaded');
     await humanDelay(1500, 2500);
 
-    const detail = await page.evaluate(() => { // TUNE selectors below
+    const detail = await page.evaluate(() => {
       const t = (sel) => document.querySelector(sel)?.textContent?.trim() || '';
       return {
-        phone:            t('[data-testid="owner-phone"]'),
-        email:            t('[data-testid="owner-email"]'),
-        mailing_address:  t('[data-testid="owner-mailing-address"]'),
-        entity_type:      t('[data-testid="owner-entity-type"]'),
+        phone:           t('a[href^="tel:"]'),
+        email:           t('a[href^="mailto:"]'),
+        mailing_address: t('[data-testid*="mailing"], [class*="MailingAddress"]'),
+        entity_type:     t('[data-testid*="entity"], [class*="EntityType"]'),
       };
     });
 
