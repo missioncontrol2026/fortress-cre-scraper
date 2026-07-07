@@ -28,8 +28,11 @@ const SUBTAB_FOR = {
 async function ensureLogin(page) {
   await page.goto(`${REONOMY_BASE}/!/home`, { waitUntil: 'domcontentloaded' });
   await humanDelay(1200, 2200);
-  // Signed-in indicator: search input on the home page
-  if (await page.$('input[placeholder*="address"]')) return true;
+  // Signed-in indicator: the Reonomy search input is present on /!/home
+  if (await page.$('input[placeholder*="Search by address"], input[placeholder*="Address"]')) {
+    await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
+    return true;
+  }
 
   const email = process.env.REONOMY_EMAIL;
   const password = process.env.REONOMY_PASSWORD;
@@ -94,12 +97,16 @@ async function propertyList(req, res) {
   try {
     await ensureLogin(page);
 
-    // 1. Go to search
+    // 1. Go to search — Reonomy's SPA hash routing lives under /!/search
     await page.goto(`${REONOMY_BASE}/!/search`, { waitUntil: 'domcontentloaded' });
-    await humanDelay(1500, 2500);
+    // Wait for the app shell to mount and the results counter or map to appear.
+    await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {});
+    await humanDelay(2000, 3500);
 
-    // 2. Open the More Filters modal
-    await page.locator('button:has-text("More Filters")').first().click();
+    // 2. Open the More Filters modal — wait patiently, the button renders after the SPA hydrates.
+    const moreFilters = page.locator('button:has-text("More Filters")').first();
+    await moreFilters.waitFor({ state: 'visible', timeout: 30000 });
+    await moreFilters.click();
     await humanDelay(700, 1200);
 
     // 3. Property Type tab is already active. Navigate to the correct sub-tab
