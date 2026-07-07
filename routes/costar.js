@@ -276,10 +276,12 @@ async function loginCostar(req, res) {
 
   const page = await newPage('costar');
   try {
-    // CoStar SSO is at secure.costargroup.com. Unauthenticated visitors to product.costar.com
-    // are redirected here for login.
-    await page.goto('https://secure.costargroup.com/login', { waitUntil: 'domcontentloaded' });
-    await humanDelay(1500, 2500);
+    // CoStar SSO requires a session token in the URL; visiting secure.costargroup.com/login
+    // directly returns "invalid or expired". Start at product.costar.com so we get redirected
+    // with the correct signin token.
+    await page.goto('https://product.costar.com/', { waitUntil: 'domcontentloaded' });
+    await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {});
+    await humanDelay(2000, 3500);
 
     // Email/username field appears first; then password (Auth0-style step). Both variants supported.
     await page.waitForSelector('input[name="username"], input[name="email"], input[type="email"], input[id*="user"], input[id*="email"]', { timeout: 30000 });
