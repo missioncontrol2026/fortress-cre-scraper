@@ -1,6 +1,6 @@
 # Playwright base image includes Chromium + all OS dependencies pre-installed.
 # Version pinned to match the playwright npm package we depend on.
-FROM mcr.microsoft.com/playwright:v1.48.0-jammy
+FROM mcr.microsoft.com/playwright:v1.61.1-jammy
 
 WORKDIR /app
 
