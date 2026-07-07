@@ -54,10 +54,18 @@ const routes = [
   { method: 'POST', path: '/admin/login/reonomy',    handler: costar.loginReonomy },
 ];
 
+// Attach Express-style helpers so route handlers can use res.status().json() and res.json().
+function decorate(res) {
+  res._status = 200;
+  res.status = function(n) { res._status = n; return res; };
+  res.json = function(body) { json(res, res._status || 200, body); return res; };
+}
+
 const server = http.createServer(async (req, res) => {
   const parsed = url.parse(req.url, true);
   const path = parsed.pathname;
   const route = routes.find((r) => r.method === req.method && r.path === path);
+  decorate(res);
 
   if (!route)                   return json(res, 404, { error: 'not_found', path });
   if (path !== '/health' && !requireAuth(req, res)) return;
