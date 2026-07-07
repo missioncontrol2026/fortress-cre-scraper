@@ -167,26 +167,63 @@ async function propertyList(req, res) {
     const countText = await page.locator('text=/^[\\d,]+\\s+properties$/').first().textContent().catch(() => '');
     const totalCount = Number((countText || '').replace(/[^\d]/g, '')) || null;
 
-    // 8. Open the list panel — clicking on the properties counter opens a right-side list.
-    // Fallback: some layouts require clicking the "list" tab. We'll wait for a results
-    // panel/list to appear; if not, we return just the count so the caller still gets signal.
+    // 8. Extract results. Reonomy renders each property as an MUI Card. innerText is
+    // stable and structured: line 1 = full address, line 2 = "X.Xk SF <PropType>",
+    // line 3 = sale info, line 4 = "Built in YYYY", then "Owner", then owner name,
+    // then "N Contacts Available".
     let rows = [];
     try {
-      // A tabular list panel is common; try to find rows
-      await page.locator('div[role="list"], [class*="ResultList"], [data-testid*="result"]').first()
-        .waitFor({ state: 'visible', timeout: 5000 });
-      rows = await page.$$eval(
-        'div[role="list"] div[role="listitem"], [class*="ResultList"] > div, [data-testid*="result-row"]',
-        (nodes) => nodes.slice(0, 25).map((n) => ({
-          address: n.querySelector('[data-col="address"], [class*="address"]')?.textContent?.trim() || '',
-          city:    n.querySelector('[data-col="city"], [class*="city"]')?.textContent?.trim() || '',
-          state:   n.querySelector('[data-col="state"], [class*="state"]')?.textContent?.trim() || '',
-          size_sf: Number((n.querySelector('[data-col="size"], [class*="size"]')?.textContent || '').replace(/[^\d]/g, '')) || null,
-          owner:   n.querySelector('[data-col="owner"], [class*="owner"]')?.textContent?.trim() || '',
-          raw:     n.innerText?.slice(0, 400) || '',
-        }))
-      );
-    } catch (_) { /* list panel didn't open — we still have the count */ }
+      await page.locator('.MuiPaper-root.MuiCard-root').first()
+        .waitFor({ state: 'visible', timeout: 15000 });
+      rows = await page.$$eval('.MuiPaper-root.MuiCard-root', (cards) => {
+        // Filesystem-size helper: parse "1.02k", "12.5m", "600" etc into SF
+        function parseSize(s) {
+          if (!s) return null;
+          const m = s.match(/([\d,.]+)\s*([kmKM]?)/);
+          if (!m) return null;
+          let n = parseFloat(m[1].replace(/,/g, ''));
+          const suf = (m[2] || '').toLowerCase();
+          if (suf === 'k') n *= 1000;
+          if (suf === 'm') n *= 1000000;
+          return Math.round(n);
+        }
+        function parseAddress(a) {
+          // "2011 W State Road 84, Fort Lauderdale, FL 33315"
+          const parts = (a || '').split(',').map((p) => p.trim());
+          if (parts.length >= 3) {
+            const stateZip = parts[parts.length - 1].split(/\s+/);
+            return {
+              address: parts.slice(0, -2).join(', '),
+              city: parts[parts.length - 2],
+              state: stateZip[0] || '',
+              zip: stateZip[1] || '',
+            };
+          }
+          return { address: a || '', city: '', state: '', zip: '' };
+        }
+        return cards.slice(0, 50).map((card) => {
+          const lines = (card.innerText || '').split(/\n+/).map((l) => l.trim()).filter(Boolean);
+          const addr = parseAddress(lines[0] || '');
+          const sizeLine = lines[1] || ''; // "1.02k SF Warehouse"
+          const sizeMatch = sizeLine.match(/^([\d,.]+\s*[kmKM]?)\s*SF\s+(.*)$/i);
+          const saleLine = lines[2] || '';
+          const builtLine = lines.find((l) => /^Built in/i.test(l)) || '';
+          const ownerIdx = lines.indexOf('Owner');
+          const owner = ownerIdx >= 0 ? (lines[ownerIdx + 1] || '') : '';
+          const contactsLine = lines.find((l) => /Contact/i.test(l)) || '';
+          const contactsMatch = contactsLine.match(/^(\d+)/);
+          return {
+            ...addr,
+            size_sf: sizeMatch ? parseSize(sizeMatch[1]) : null,
+            property_type: sizeMatch ? sizeMatch[2] : '',
+            last_sale: /^Sold on/i.test(saleLine) ? saleLine.replace(/^Sold on\s+/, '') : '',
+            year_built: (builtLine.match(/(\d{4})/) || [])[1] || '',
+            owner,
+            contacts_available: contactsMatch ? Number(contactsMatch[1]) : null,
+          };
+        });
+      });
+    } catch (_) { /* list panel didn't render — we still have the count */ }
 
     // 9. Optional dedupe
     if (Array.isArray(body.dedupe_against) && body.dedupe_against.length) {
