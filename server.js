@@ -54,6 +54,7 @@ const routes = [
   { method: 'POST', path: '/admin/login/costar',              handler: costar.loginCostar },
   { method: 'POST', path: '/admin/login/reonomy',             handler: costar.loginReonomy },
   { method: 'POST', path: '/admin/import-costar-session',     handler: costar.importCostarSession },
+  { method: 'POST', path: '/admin/import-session',            handler: costar.importSession }, // { vendor: costar|reonomy, cookies, origins }
 ];
 
 // Attach Express-style helpers so route handlers can use res.status().json() and res.json().

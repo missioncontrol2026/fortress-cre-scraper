@@ -491,22 +491,24 @@ async function loginCostar(req, res) {
   }
 }
 
-// Import a CoStar session captured from a real browser (bypasses Akamai bot detection).
-// POST /admin/import-costar-session
-// body: { cookies: [{ name, value, domain, path, expires, httpOnly, secure, sameSite }], origins?: [{ origin, localStorage: [{name, value}] }] }
-// Writes to /app/sessions/costar.storage.json so next `newPage('costar')` uses it.
-async function importCostarSession(req, res) {
+// Import a real-browser session captured from a live tab (bypasses bot detection).
+// POST /admin/import-session
+// body: { vendor: "costar"|"reonomy", cookies: [...], origins?: [...] }
+// Writes to /app/sessions/<vendor>.storage.json AND seeds userDataDir.
+async function importSession(req, res) {
   const path = require('path');
   const fs   = require('fs');
   const b = req.body || {};
+  const vendor = (b.vendor || '').toLowerCase();
   const cookies = Array.isArray(b.cookies) ? b.cookies : null;
+  if (!['costar', 'reonomy'].includes(vendor)) return res.status(400).json({ error: 'vendor must be costar or reonomy' });
   if (!cookies || !cookies.length) return res.status(400).json({ error: 'cookies array required' });
 
-  // Normalize each cookie into Playwright storage_state format
+  const defaultDomain = vendor === 'costar' ? '.costar.com' : '.reonomy.com';
   const normalized = cookies.map((c) => ({
     name:     c.name,
     value:    c.value,
-    domain:   c.domain    || '.costar.com',
+    domain:   c.domain    || defaultDomain,
     path:     c.path      || '/',
     expires:  typeof c.expires === 'number' ? c.expires : -1,
     httpOnly: c.httpOnly === true,
@@ -514,22 +516,15 @@ async function importCostarSession(req, res) {
     sameSite: c.sameSite || 'Lax',
   }));
 
-  const storageState = {
-    cookies:  normalized,
-    origins:  Array.isArray(b.origins) ? b.origins : [],
-  };
-
+  const storageState = { cookies: normalized, origins: Array.isArray(b.origins) ? b.origins : [] };
   const SESSIONS_DIR = process.env.SESSIONS_DIR || '/app/sessions';
   fs.mkdirSync(SESSIONS_DIR, { recursive: true });
-  const outFile = path.join(SESSIONS_DIR, 'costar.storage.json');
+  const outFile = path.join(SESSIONS_DIR, `${vendor}.storage.json`);
   fs.writeFileSync(outFile, JSON.stringify(storageState, null, 0));
 
-  // Also seed the persistent context userDataDir with these cookies so the FIRST
-  // page.goto after this import already has them. Playwright's launchPersistentContext
-  // reads cookies from Cookies file — simplest way: launch context, addCookies, close.
   try {
     const { chromium } = require('patchright');
-    const userDataDir = path.join(SESSIONS_DIR, 'costar-userdata');
+    const userDataDir = path.join(SESSIONS_DIR, `${vendor}-userdata`);
     fs.mkdirSync(userDataDir, { recursive: true });
     const ctx = await chromium.launchPersistentContext(userDataDir, {
       channel: 'chromium', headless: true, viewport: null,
@@ -539,10 +534,16 @@ async function importCostarSession(req, res) {
     await ctx.addCookies(normalized);
     await ctx.close();
   } catch (seedErr) {
-    console.error('cookie seed to userDataDir failed:', seedErr.message);
+    console.error(`cookie seed to ${vendor} userDataDir failed:`, seedErr.message);
   }
 
-  res.json({ ok: true, cookieCount: normalized.length, storageStatePath: outFile });
+  res.json({ ok: true, vendor, cookieCount: normalized.length, storageStatePath: outFile });
+}
+
+// Alias for backward compat with the earlier CoStar-specific route
+async function importCostarSession(req, res) {
+  req.body = { ...(req.body || {}), vendor: 'costar' };
+  return importSession(req, res);
 }
 
 // Same for Reonomy (Auth0 usually just needs email+password, no 2FA)
@@ -576,5 +577,6 @@ module.exports = {
   loginCostar,
   loginReonomy,
   importCostarSession,
+  importSession,
   quota,
 };
