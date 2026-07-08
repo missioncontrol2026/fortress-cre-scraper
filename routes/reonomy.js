@@ -325,4 +325,63 @@ async function ownerDetail(req, res) {
   }
 }
 
-module.exports = { propertyList, ownerDetail, ensureLogin };
+
+// ---------- Workflow R1-fast — Load saved-search URL, intercept API responses ----------
+// POST /reonomy/saved-search
+// body: { search_uuid: "99a5345f-...", limit: 25 }
+// Bypasses all filter UI clicking. Requires user to have set up filters in a
+// saved search once. All subsequent runs use that URL.
+async function savedSearch(req, res) {
+  const gate = tryConsume('reonomy');
+  if (!gate.ok) return res.status(429).json({ error: 'rate_limited', ...gate });
+  const b = req.body || {};
+  const uuid = b.search_uuid;
+  const limit = Number(b.limit) || 25;
+  if (!uuid) return res.status(400).json({ error: 'search_uuid required' });
+
+  const page = await newPage('reonomy');
+  try {
+    const apiResponses = [];
+    page.on('response', async (resp) => {
+      const u = resp.url();
+      if (u.includes('api.reonomy.com/v2') && (u.includes('search') || u.includes('summary'))) {
+        try {
+          const status = resp.status();
+          const text = await resp.text();
+          apiResponses.push({ url: u, status, text });
+        } catch {}
+      }
+    });
+
+    await page.goto(`${REONOMY_BASE}/!/search/${uuid}`, { waitUntil: 'domcontentloaded', timeout: 45000 });
+    await page.waitForLoadState('networkidle', { timeout: 60000 }).catch(() => {});
+    await humanDelay(3000, 5000);
+
+    // Find the properties/summary response
+    const summary = apiResponses.reverse().find(r => r.status === 200 && (r.text.includes('property') || r.text.includes('address')));
+    if (!summary) {
+      return res.status(502).json({
+        error: 'reonomy_no_data',
+        message: 'Loaded saved search but no property data intercepted',
+        capturedCount: apiResponses.length,
+        urls: apiResponses.map(r => r.url).slice(0, 10),
+      });
+    }
+    let parsed;
+    try { parsed = JSON.parse(summary.text); } catch { return res.status(502).json({ error: 'reonomy_parse_error', body: summary.text.slice(0, 400) }); }
+    return res.json({
+      workflow: 'R1-fast',
+      module: 'reonomy saved-search intercept',
+      search_uuid: uuid,
+      raw_top_keys: Object.keys(parsed || {}),
+      preview: JSON.stringify(parsed).slice(0, 4000),
+    });
+  } catch (err) {
+    console.error('R1-fast error:', err);
+    res.status(500).json({ error: 'reonomy_saved_search_failed', message: err.message });
+  } finally {
+    await page.close().catch(() => {});
+  }
+}
+
+module.exports = { propertyList, ownerDetail, savedSearch, ensureLogin };

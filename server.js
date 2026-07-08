@@ -42,6 +42,7 @@ const routes = [
   // Reonomy
   { method: 'POST', path: '/reonomy/property-list',  handler: reonomy.propertyList },
   { method: 'POST', path: '/reonomy/owner-detail',   handler: reonomy.ownerDetail },
+  { method: 'POST', path: '/reonomy/saved-search',   handler: reonomy.savedSearch },
 
   // CoStar
   { method: 'POST', path: '/costar/buyer-search',    handler: costar.buyerSearch },   // C1/C2/C3 via body.mode (legacy Sale Comps path)
