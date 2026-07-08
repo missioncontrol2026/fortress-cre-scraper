@@ -11,6 +11,7 @@
   "dependencies": {
     "playwright": "1.61.1",
     "patchright": "1.61.1",
-    "proxy-chain": "^2.5.0"
+    "proxy-chain": "^2.5.0",
+    "impers": "^0.0.9"
   }
 }

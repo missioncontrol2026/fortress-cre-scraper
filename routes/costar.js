@@ -192,103 +192,104 @@ async function ownerSearch(req, res) {
   catch (e) { return res.status(e.status).json({ error: 'rate_limited', ...e.gate }); }
   const b = req.body || {};
   const limit = Math.min(b.result_limit || 20, 100);
+  const { graphql } = require('../lib/costarGql');
 
-  const page = await newPage('costar');
-  try {
-    // ensureLogin navigates to the target URL and verifies we're authenticated
-    await ensureLogin(page, URLS.ownersCompanies);
-    await humanDelay(1500, 2500);
-
-    // Wait for results table to render (CSG table). If it doesn't render, dump diagnostics.
-    try {
-      await page.waitForSelector('table.csg-tw-table tr.csg-tw-table-row', { timeout: 30000 });
-    } catch (waitErr) {
-      const diag = await page.evaluate(() => ({
-        url: location.href,
-        title: document.title,
-        headText: (document.querySelector('h1, h2')?.textContent || '').slice(0, 120),
-        bodyChars: document.body.innerText.length,
-        bodyPreview: document.body.innerText.slice(0, 500),
-        hasTable: !!document.querySelector('table'),
-        hasCsgTable: !!document.querySelector('table.csg-tw-table'),
-        rowCount: document.querySelectorAll('tr').length,
-      }));
-      throw new Error(`table did not render — diag: ${JSON.stringify(diag)}`);
-    }
-
-    // Owner Type filter (multi-select autocomplete by placeholder)
-    if (Array.isArray(b.owner_types_include) && b.owner_types_include.length) {
-      const ownerTypeInput = page.locator('input[placeholder="Owner Type"]').first();
-      for (const t of b.owner_types_include) {
-        await ownerTypeInput.click();
-        await humanDelay(300, 600);
-        await ownerTypeInput.fill(t);
-        await humanDelay(500, 900);
-        await page.keyboard.press('Enter');
-        await humanDelay(300, 600);
+  const query = `query CompaniesSearch($searchRequest: CompaniesSearchRequestInput!) {
+  companies {
+    companiesSearchWithList(searchRequest: $searchRequest) {
+      data {
+        id
+        companyKey
+        locationName
+        hierarchy
+        ownerType
+        cityId
+        stateId
+        countryCode
+        countryId
+        numberOfProperties
+        buildingSqFtTotal
+        averageSqFtTotal
+        primaryPropertyType
+        acquistitions
+        dispositions
+        forSalePriceTotal
+        numberOfForSales
+        continentalFocus
+        territory
       }
-      await page.keyboard.press('Escape');
     }
-
-    // Main Property Type filter
-    if (b.main_property_type) {
-      const propInput = page.locator('input[placeholder="Main Property Type"]').first();
-      await propInput.click();
-      await humanDelay(300, 600);
-      await propInput.fill(b.main_property_type);
-      await humanDelay(500, 900);
-      await page.keyboard.press('Enter');
-      await page.keyboard.press('Escape');
-      await humanDelay(400, 800);
-    }
-
-    // Wait for table refresh after filters
-    await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {});
-    await humanDelay(1200, 2000);
-
-    // Extract rows — positional column indexes per COSTAR-DOM-NOTES.md
-    const rows = await page.$$eval(
-      'table.csg-tw-table tr.csg-tw-table-row',
-      (nodes, n) => {
-        const t = (el) => (el?.textContent || '').trim();
-        return nodes.slice(0, n).map((r) => {
-          const cells = Array.from(r.querySelectorAll('td.csg-tw-table-cell'));
-          if (cells.length < 15) return null;
-          return {
-            company:              t(cells[1]),
-            hierarchy:            t(cells[2]),
-            owner_type:           t(cells[3]),
-            hq_city:              t(cells[4]),
-            hq_state:             t(cells[5]),
-            hq_country:           t(cells[6]),
-            property_count:       Number((t(cells[7]) || '').replace(/[^\d]/g, '')) || null,
-            total_sf_owned:       Number((t(cells[8]) || '').replace(/[^\d]/g, '')) || null,
-            avg_sf:               Number((t(cells[9]) || '').replace(/[^\d]/g, '')) || null,
-            main_property_type:   t(cells[13]),
-            recent_deal_count:    Number((t(cells[19]) || '').replace(/[^\d]/g, '')) || null,
-            avg_deal_value:       t(cells[20]),
-            twelve_month_value:   t(cells[21]),
-            total_value:          t(cells[22]),
-          };
-        }).filter(Boolean);
+  }
+}`;
+  const variables = {
+    searchRequest: {
+      pageNumber: 1,
+      pageSize: Math.min(Math.max(limit * 2, 20), 100),  // fetch more than limit so we can filter client-side
+      searchCriteria: {
+        portfolio: {
+          buildingAreaSqFtTotal: { minimum: b.min_portfolio_sf || 100000 },
+          numberOfPropertiesTotal: { minimum: 25 },
+        },
+        sortType: 0,
       },
-      limit,
-    );
+    },
+  };
 
-    // Optional post-filter for excluded owner types (CoStar UI doesn't have simple exclude)
+  try {
+    const r = await graphql({
+      endpoint: 'https://product.costar.com/suiteapps/owners/graphql',
+      query,
+      variables,
+      operationName: 'CompaniesSearch',
+    });
+    if (r.status !== 200) {
+      return res.status(502).json({ error: 'costar_graphql_error', status: r.status, body: r.text.slice(0, 800) });
+    }
+    const parsed = JSON.parse(r.text);
+    if (parsed.errors) {
+      return res.status(502).json({ error: 'costar_graphql_errors', errors: parsed.errors });
+    }
+    const raw = parsed.data?.companies?.companiesSearchWithList?.data || [];
+    let rows = raw.map((r) => ({
+      company:            r.locationName,
+      hierarchy:          r.hierarchy,
+      owner_type:         r.ownerType,
+      hq_city:            r.cityId,
+      hq_state:           r.stateId,
+      hq_country:         r.countryCode || r.countryId,
+      property_count:     Number((r.numberOfProperties || '').replace(/[^\d]/g, '')) || null,
+      total_sf_owned:     Number((r.buildingSqFtTotal || '').replace(/[^\d]/g, '')) || null,
+      avg_sf:             Number((r.averageSqFtTotal || '').replace(/[^\d]/g, '')) || null,
+      main_property_type: r.primaryPropertyType,
+      recent_deal_count:  Number((r.numberOfForSales || '').replace(/[^\d]/g, '')) || null,
+      avg_deal_value:     r.forSalePriceTotal,
+      twelve_month_value: r.acquistitions,
+      total_value:        r.dispositions,
+      continental_focus:  r.continentalFocus,
+      territory:          r.territory,
+      company_key:        r.companyKey,
+    }));
     let filtered = rows;
+    if (b.main_property_type) {
+      const mp = b.main_property_type.toLowerCase();
+      filtered = filtered.filter((r) => (r.main_property_type || '').toLowerCase() === mp);
+    }
+    if (Array.isArray(b.owner_types_include) && b.owner_types_include.length) {
+      const inc = new Set(b.owner_types_include.map((s) => s.toLowerCase()));
+      filtered = filtered.filter((r) => inc.has((r.owner_type || '').toLowerCase()));
+    }
     if (Array.isArray(b.owner_types_exclude) && b.owner_types_exclude.length) {
       const excl = new Set(b.owner_types_exclude.map((s) => s.toLowerCase()));
-      filtered = rows.filter((r) => !excl.has((r.owner_type || '').toLowerCase()));
+      filtered = filtered.filter((r) => !excl.has((r.owner_type || '').toLowerCase()));
     }
     if (b.hq_country) {
       filtered = filtered.filter((r) => (r.hq_country || '').toLowerCase() === b.hq_country.toLowerCase());
     }
+    filtered = filtered.slice(0, limit);
 
-    await saveState('costar');
     res.json({
       workflow: 'C1',
-      module: 'owners/companies',
+      module: 'owners/companies (graphql)',
       count: filtered.length,
       total_before_client_filter: rows.length,
       rows: filtered,
@@ -297,8 +298,6 @@ async function ownerSearch(req, res) {
   } catch (err) {
     console.error('C1 (owner-search) error:', err);
     res.status(err.status || 500).json({ error: 'costar_owner_search_failed', message: err.message });
-  } finally {
-    await page.close().catch(() => {});
   }
 }
 
@@ -521,6 +520,13 @@ async function importSession(req, res) {
   fs.mkdirSync(SESSIONS_DIR, { recursive: true });
   const outFile = path.join(SESSIONS_DIR, `${vendor}.storage.json`);
   fs.writeFileSync(outFile, JSON.stringify(storageState, null, 0));
+
+  // Save extra headers (e.g. cs-owners-formatting-prefs JWT) that impers-based
+  // fetches must include to satisfy CoStar's app-layer auth
+  if (b.extraHeaders && typeof b.extraHeaders === 'object') {
+    const hdrFile = path.join(SESSIONS_DIR, `${vendor}.headers.json`);
+    fs.writeFileSync(hdrFile, JSON.stringify(b.extraHeaders));
+  }
 
   try {
     const { chromium } = require('patchright');
