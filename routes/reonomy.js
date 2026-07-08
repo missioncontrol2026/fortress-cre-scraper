@@ -103,173 +103,41 @@ async function clickTab(page, text) {
 async function propertyList(req, res) {
   const gate = tryConsume('reonomy');
   if (!gate.ok) return res.status(429).json({ error: 'rate_limited', ...gate });
+  const b = req.body || {};
 
-  const body = req.body || {};
-  const propertyTypes = Array.isArray(body.property_types) && body.property_types.length
-    ? body.property_types
-    : ['Warehouse'];
-  const minSize = Number(body.min_size_sf) || 15000;
-  const ownerType = body.owner_type === 'Company' ? 'Company'
-                 : body.owner_type === 'Person'  ? 'Person'
-                 : null;
-  const requirePhone = body.require_phone === true; // default OFF while UI tuning
+  const queue = require('./queue');
+  const jobId = queue._enqueueDirect({
+    vendor: 'reonomy',
+    params: {
+      limit: b.result_limit || 20,
+      property_types: b.property_types || ['warehouse'],
+      min_size_sf: b.min_size_sf,
+    },
+  });
 
-  const page = await newPage('reonomy');
-  try {
-    await ensureLogin(page);
-
-    // 1. Go to search — Reonomy SPA lives under hash routing. Try the direct search URL,
-    // then fall back to clicking "Advanced Search" from the home page if the SPA landed there.
-    await page.goto(`${REONOMY_BASE}/!/search`, { waitUntil: 'domcontentloaded' });
-    await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {});
-    await humanDelay(2500, 4000);
-
-    // If we landed on /!/home instead of /!/search (SPA sometimes redirects), click Advanced Search.
-    const advSearch = page.locator('text=/Advanced Search/i').first();
-    if (await advSearch.isVisible().catch(() => false)) {
-      await advSearch.click();
-      await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
-      await humanDelay(1500, 2500);
-    }
-
-    // 2. Open the More Filters modal — wait patiently, the button renders after the SPA hydrates.
-    const moreFilters = page.locator('[data-testid="more-filters-button"], button:has-text("More Filters")').first();
-    await moreFilters.waitFor({ state: 'visible', timeout: 45000 });
-    await moreFilters.click();
-    await humanDelay(700, 1200);
-
-    // 3. Property Type tab is already active. Navigate to the correct sub-tab
-    // (Industrial for warehouse/plants, Multifamily for units, etc.)
-    const subtabs = new Set(propertyTypes.map((t) => SUBTAB_FOR[t] || 'Industrial'));
-    for (const subtab of subtabs) {
-      await clickTab(page, subtab);
-      for (const t of propertyTypes.filter((x) => (SUBTAB_FOR[x] || 'Industrial') === subtab)) {
-        await checkboxByLabel(page, t);
-      }
-    }
-
-    // 4. Building & Lot tab → Building Area min
-    if (minSize) {
-      await clickTab(page, 'Building & Lot');
-      // The "Building Area" section has min/max inputs; find the min under that heading.
-      // Reonomy renders labels above the input pair, so pick the input that lives inside
-      // the section following a heading with text "Building Area".
-      const buildingAreaMin = page.locator(
-        'text="Building Area" >> xpath=following::input[@placeholder="min"][1]'
-      );
-      await buildingAreaMin.waitFor({ state: 'visible', timeout: 10000 });
-      await buildingAreaMin.fill(String(minSize));
-      await humanDelay(300, 700);
-    }
-
-    // 5. Owner tab → Owner Type + Contact Info. Owner-type toggle buttons live inside
-    // the Owner tab panel; scope the button lookup so it doesn't clash with other tabs.
-    if (ownerType || requirePhone) {
-      await clickTab(page, 'Owner');
-      await humanDelay(600, 1000);
-      const ownerPanel = page.locator('[role="tabpanel"]').filter({ hasText: 'Owner Type' }).first();
-      if (ownerType) {
-        await ownerPanel.locator('button', { hasText: new RegExp(`^${ownerType}$`) })
-          .first().click({ timeout: 8000 }).catch(() => {});
-        await humanDelay(200, 500);
-      }
-      if (requirePhone) {
-        await ownerPanel.locator('button', { hasText: /phone/i })
-          .first().click({ timeout: 8000 }).catch(() => {});
-        await humanDelay(200, 500);
-      }
-    }
-
-    // 6. Apply filters
-    await page.locator('button:has-text("Apply")').first().click();
-    await humanDelay(1500, 2500);
-
-    // 7. Read the result count from the top-right ("N properties")
-    const countText = await page.locator('text=/^[\\d,]+\\s+properties$/').first().textContent().catch(() => '');
-    const totalCount = Number((countText || '').replace(/[^\d]/g, '')) || null;
-
-    // 8. Extract results. Reonomy renders each property as an MUI Card. innerText is
-    // stable and structured: line 1 = full address, line 2 = "X.Xk SF <PropType>",
-    // line 3 = sale info, line 4 = "Built in YYYY", then "Owner", then owner name,
-    // then "N Contacts Available".
-    let rows = [];
-    try {
-      await page.locator('.MuiPaper-root.MuiCard-root').first()
-        .waitFor({ state: 'visible', timeout: 15000 });
-      rows = await page.$$eval('.MuiPaper-root.MuiCard-root', (cards) => {
-        // Filesystem-size helper: parse "1.02k", "12.5m", "600" etc into SF
-        function parseSize(s) {
-          if (!s) return null;
-          const m = s.match(/([\d,.]+)\s*([kmKM]?)/);
-          if (!m) return null;
-          let n = parseFloat(m[1].replace(/,/g, ''));
-          const suf = (m[2] || '').toLowerCase();
-          if (suf === 'k') n *= 1000;
-          if (suf === 'm') n *= 1000000;
-          return Math.round(n);
-        }
-        function parseAddress(a) {
-          // "2011 W State Road 84, Fort Lauderdale, FL 33315"
-          const parts = (a || '').split(',').map((p) => p.trim());
-          if (parts.length >= 3) {
-            const stateZip = parts[parts.length - 1].split(/\s+/);
-            return {
-              address: parts.slice(0, -2).join(', '),
-              city: parts[parts.length - 2],
-              state: stateZip[0] || '',
-              zip: stateZip[1] || '',
-            };
-          }
-          return { address: a || '', city: '', state: '', zip: '' };
-        }
-        return cards.slice(0, 50).map((card) => {
-          const lines = (card.innerText || '').split(/\n+/).map((l) => l.trim()).filter(Boolean);
-          const addr = parseAddress(lines[0] || '');
-          const sizeLine = lines[1] || ''; // "1.02k SF Warehouse"
-          const sizeMatch = sizeLine.match(/^([\d,.]+\s*[kmKM]?)\s*SF\s+(.*)$/i);
-          const saleLine = lines[2] || '';
-          const builtLine = lines.find((l) => /^Built in/i.test(l)) || '';
-          const ownerIdx = lines.indexOf('Owner');
-          const owner = ownerIdx >= 0 ? (lines[ownerIdx + 1] || '') : '';
-          const contactsLine = lines.find((l) => /Contact/i.test(l)) || '';
-          const contactsMatch = contactsLine.match(/^(\d+)/);
-          return {
-            ...addr,
-            size_sf: sizeMatch ? parseSize(sizeMatch[1]) : null,
-            property_type: sizeMatch ? sizeMatch[2] : '',
-            last_sale: /^Sold on/i.test(saleLine) ? saleLine.replace(/^Sold on\s+/, '') : '',
-            year_built: (builtLine.match(/(\d{4})/) || [])[1] || '',
-            owner,
-            contacts_available: contactsMatch ? Number(contactsMatch[1]) : null,
-          };
-        });
-      });
-    } catch (_) { /* list panel didn't render — we still have the count */ }
-
-    // 9. Optional dedupe
-    if (Array.isArray(body.dedupe_against) && body.dedupe_against.length) {
-      rows = tagDupes(rows, body.dedupe_against, {
-        phone: 'phone', address: 'address', entity: 'entity',
+  const timeoutMs = 90000;
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const entry = queue._getJob(jobId);
+    if (entry && entry.status === 'done') {
+      const raw = entry.result;
+      if (!raw) return res.status(502).json({ error: 'reonomy_no_data' });
+      if (raw.status && raw.status !== 200) return res.status(502).json({ error: 'reonomy_extension_error', status: raw.status, body: (raw.body || '').slice(0, 800) });
+      let parsed;
+      try { parsed = typeof raw.body === 'string' ? JSON.parse(raw.body) : raw.body; }
+      catch { return res.status(502).json({ error: 'reonomy_parse_error', body: (raw.body || '').slice(0, 400) }); }
+      return res.json({
+        workflow: 'R1',
+        module: 'reonomy (extension bridge)',
+        count: (parsed.items || []).length,
+        raw: parsed,
       });
     }
-
-    await saveState('reonomy');
-    res.json({
-      workflow: 'R1',
-      total_count: totalCount,
-      returned_count: rows.length,
-      rows,
-      note: rows.length === 0
-        ? 'Filters applied but the result list panel selectors need one more inspection round. Total count is trustworthy.'
-        : undefined,
-    });
-  } catch (err) {
-    console.error('R1 error:', err);
-    res.status(500).json({ error: 'reonomy_r1_failed', message: err.message });
-  } finally {
-    await page.close().catch(() => {});
+    await new Promise(r => setTimeout(r, 500));
   }
+  return res.status(504).json({ error: 'reonomy_extension_timeout' });
 }
+
 
 // ---------- Workflow R2 ----------
 // POST /reonomy/owner-detail

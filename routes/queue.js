@@ -68,4 +68,13 @@ async function waitFor(req, res) {
   res.status(504).json({ id, status: 'timeout', message: 'extension did not deliver in time - is Chrome open with the tabs signed in?' });
 }
 
-module.exports = { enqueue, pull, deliver, status, waitFor };
+function _enqueueDirect(job) {
+  const id = makeId();
+  const full = { id, vendor: job.vendor, params: job.params || {}, created: Date.now() };
+  jobs.set(id, { status: 'pending', job: full });
+  pendingList.push(id);
+  return id;
+}
+function _getJob(id) { return jobs.get(id); }
+
+module.exports = { _enqueueDirect, _getJob, enqueue, pull, deliver, status, waitFor };
