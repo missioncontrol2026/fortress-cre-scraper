@@ -196,27 +196,7 @@ async function ownerSearch(req, res) {
   const query = `query CompaniesSearch($searchRequest: CompaniesSearchRequestInput!) {
   companies {
     companiesSearchWithList(searchRequest: $searchRequest) {
-      data {
-        id
-        companyKey
-        locationName
-        hierarchy
-        ownerType
-        cityId
-        stateId
-        countryCode
-        countryId
-        numberOfProperties
-        buildingSqFtTotal
-        averageSqFtTotal
-        primaryPropertyType
-        acquistitions
-        dispositions
-        forSalePriceTotal
-        numberOfForSales
-        continentalFocus
-        territory
-      }
+      data { id companyKey locationName hierarchy ownerType cityId stateId countryCode countryId numberOfProperties buildingSqFtTotal averageSqFtTotal primaryPropertyType acquistitions dispositions forSalePriceTotal numberOfForSales continentalFocus territory }
     }
   }
 }`;
@@ -234,96 +214,114 @@ async function ownerSearch(req, res) {
     },
   };
 
-  // Intercept the SPA's OWN GraphQL responses. Akamai's bot-detection JS runs
-  // against the SPA's fetches (which pass); explicit fetch() from page.evaluate()
-  // is treated as scraping and blocked with 403. By listening for the response
-  // the SPA fires when it loads the search page with its default filters, we
-  // capture data through the trusted (SPA-native) path.
-  const page = await newPage('costar');
+  // POST to CoStar's GraphQL via ScrapingBee - they handle Akamai
   try {
-    const graphqlResponses = [];
-    page.on('response', async (resp) => {
-      const url = resp.url();
-      if (url.includes('/suiteapps/owners/graphql') && resp.request().method() === 'POST') {
-        try {
-          const status = resp.status();
-          const text = await resp.text();
-          graphqlResponses.push({ status, text });
-        } catch {}
-      }
+    const key = process.env.SCRAPINGBEE_API_KEY;
+    if (!key) return res.status(500).json({ error: 'SCRAPINGBEE_API_KEY not set' });
+    const path = require('path');
+    const fs = require('fs');
+    const SESSIONS_DIR = process.env.SESSIONS_DIR || '/app/sessions';
+    let cookies = '';
+    try {
+      const raw = fs.readFileSync(path.join(SESSIONS_DIR, 'costar.storage.json'), 'utf8');
+      const parsed = JSON.parse(raw);
+      cookies = (parsed.cookies || [])
+        .filter((c) => c.name && c.value)
+        .map((c) => `${c.name}=${c.value}`)
+        .join(';');
+    } catch {}
+    let extraHeaders = {};
+    try {
+      const hf = path.join(SESSIONS_DIR, 'costar.headers.json');
+      if (fs.existsSync(hf)) extraHeaders = JSON.parse(fs.readFileSync(hf, 'utf8'));
+    } catch {}
+
+    // ScrapingBee POST proxy: use request body forwarding
+    const params = new URLSearchParams({
+      api_key: key,
+      url: 'https://product.costar.com/suiteapps/owners/graphql',
+      premium_proxy: 'true',
+      country_code: 'us',
+      render_js: 'false',
+      forward_headers: 'true',
+      forward_headers_pure: 'true',
+    });
+    if (cookies) params.set('cookies', cookies);
+
+    const headers = {
+      'Content-Type': 'application/json',
+      'Spb-Content-Type': 'application/json',
+      'Spb-Accept': '*/*',
+      'Spb-Referer': 'https://product.costar.com/suiteapps/owners/companies?new_search=true',
+      'Spb-Origin': 'https://product.costar.com',
+    };
+    for (const [k, v] of Object.entries(extraHeaders)) headers['Spb-' + k] = v;
+
+    const body = JSON.stringify({ query, variables, operationName: 'CompaniesSearch' });
+    const https = require('https');
+    const r = await new Promise((resolve, reject) => {
+      const req = https.request('https://app.scrapingbee.com/api/v1/?' + params.toString(),
+        { method: 'POST', headers, timeout: 90000 },
+        (resp) => {
+          let text = '';
+          resp.on('data', (c) => text += c);
+          resp.on('end', () => resolve({ status: resp.statusCode, text }));
+        });
+      req.on('error', reject);
+      req.on('timeout', () => req.destroy(new Error('timeout')));
+      req.write(body);
+      req.end();
     });
 
-    // Load the base URL (last-saved search auto-fires the SPA's graphql on hydration).
-    await ensureLogin(page, 'https://product.costar.com/suiteapps/owners/companies');
-    await page.waitForLoadState('networkidle', { timeout: 45000 }).catch(() => {});
-    await humanDelay(2500, 4500);
-
-    // Prefer the last 200 that contains companiesSearchWithList payload
-    const r = graphqlResponses.slice().reverse().find(x => x.status === 200 && x.text.includes('companiesSearchWithList')) || graphqlResponses[0];
-    if (!r) {
-      return res.status(502).json({ error: 'costar_no_response', message: 'SPA did not fire a companies GraphQL query within timeout', capturedCount: graphqlResponses.length });
-    }
     if (r.status !== 200) {
-      return res.status(502).json({ error: 'costar_graphql_error', status: r.status, body: (r.text || '').slice(0, 800) });
+      return res.status(502).json({ error: 'costar_scrapingbee_error', status: r.status, body: (r.text || '').slice(0, 800) });
     }
-    const parsed = JSON.parse(r.text);
-    if (parsed.errors) {
-      return res.status(502).json({ error: 'costar_graphql_errors', errors: parsed.errors });
-    }
+    let parsed;
+    try { parsed = JSON.parse(r.text); } catch { return res.status(502).json({ error: 'costar_parse_error', body: r.text.slice(0, 400) }); }
+    if (parsed.errors) return res.status(502).json({ error: 'costar_graphql_errors', errors: parsed.errors });
     const raw = parsed.data?.companies?.companiesSearchWithList?.data || [];
     let rows = raw.map((r) => ({
-      company:            r.locationName,
-      hierarchy:          r.hierarchy,
-      owner_type:         r.ownerType,
-      hq_city:            r.cityId,
-      hq_state:           r.stateId,
-      hq_country:         r.countryCode || r.countryId,
-      property_count:     Number((r.numberOfProperties || '').replace(/[^\d]/g, '')) || null,
-      total_sf_owned:     Number((r.buildingSqFtTotal || '').replace(/[^\d]/g, '')) || null,
-      avg_sf:             Number((r.averageSqFtTotal || '').replace(/[^\d]/g, '')) || null,
+      company: r.locationName,
+      hierarchy: r.hierarchy,
+      owner_type: r.ownerType,
+      hq_city: r.cityId,
+      hq_state: r.stateId,
+      hq_country: r.countryCode || r.countryId,
+      property_count: Number((r.numberOfProperties || '').toString().replace(/[^\d]/g, '')) || null,
+      total_sf_owned: Number((r.buildingSqFtTotal || '').toString().replace(/[^\d]/g, '')) || null,
+      avg_sf: Number((r.averageSqFtTotal || '').toString().replace(/[^\d]/g, '')) || null,
       main_property_type: r.primaryPropertyType,
-      recent_deal_count:  Number((r.numberOfForSales || '').replace(/[^\d]/g, '')) || null,
-      avg_deal_value:     r.forSalePriceTotal,
+      recent_deal_count: Number((r.numberOfForSales || '').toString().replace(/[^\d]/g, '')) || null,
+      avg_deal_value: r.forSalePriceTotal,
       twelve_month_value: r.acquistitions,
-      total_value:        r.dispositions,
-      continental_focus:  r.continentalFocus,
-      territory:          r.territory,
-      company_key:        r.companyKey,
+      total_value: r.dispositions,
+      company_key: r.companyKey,
     }));
-    let filtered = rows;
     if (b.main_property_type) {
       const mp = b.main_property_type.toLowerCase();
-      filtered = filtered.filter((r) => (r.main_property_type || '').toLowerCase() === mp);
+      rows = rows.filter((r) => (r.main_property_type || '').toLowerCase() === mp);
     }
     if (Array.isArray(b.owner_types_include) && b.owner_types_include.length) {
       const inc = new Set(b.owner_types_include.map((s) => s.toLowerCase()));
-      filtered = filtered.filter((r) => inc.has((r.owner_type || '').toLowerCase()));
+      rows = rows.filter((r) => inc.has((r.owner_type || '').toLowerCase()));
     }
     if (Array.isArray(b.owner_types_exclude) && b.owner_types_exclude.length) {
       const excl = new Set(b.owner_types_exclude.map((s) => s.toLowerCase()));
-      filtered = filtered.filter((r) => !excl.has((r.owner_type || '').toLowerCase()));
+      rows = rows.filter((r) => !excl.has((r.owner_type || '').toLowerCase()));
     }
-    if (b.hq_country) {
-      filtered = filtered.filter((r) => (r.hq_country || '').toLowerCase() === b.hq_country.toLowerCase());
-    }
-    filtered = filtered.slice(0, limit);
-
-    res.json({
+    rows = rows.slice(0, limit);
+    return res.json({
       workflow: 'C1',
-      module: 'owners/companies (graphql via SPA)',
-      count: filtered.length,
-      total_before_client_filter: rows.length,
-      rows: filtered,
+      module: 'owners/companies (scrapingbee)',
+      count: rows.length,
+      rows,
       quota_usage: currentUsage('costar'),
     });
   } catch (err) {
     console.error('C1 (owner-search) error:', err);
-    res.status(err.status || 500).json({ error: 'costar_owner_search_failed', message: err.message });
-  } finally {
-    await page.close().catch(() => {});
+    return res.status(500).json({ error: 'costar_owner_search_failed', message: err.message });
   }
 }
-
 // ---------- Workflow C4 — Sales & lease comps for underwriting brief ----------
 // POST /costar/comps
 // body: {
