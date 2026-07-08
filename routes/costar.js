@@ -304,10 +304,17 @@ async function ownerSearch(req, res) {
       territory:          r.territory,
       company_key:        r.companyKey,
     }));
+    // Normalize property type for matching: strip spaces, hyphens, slashes; lowercase.
+    // Handles "Multi-Family" vs "Multifamily" vs "Multi Family" vs "Multi-family / Apartments".
+    const normType = (s) => String(s || '').toLowerCase().replace(/[\s\-\/_&]+/g, '');
     let filtered = rows;
     if (b.main_property_type) {
-      const mp = b.main_property_type.toLowerCase();
-      filtered = filtered.filter((r) => (r.main_property_type || '').toLowerCase() === mp);
+      const mp = normType(b.main_property_type);
+      filtered = filtered.filter((r) => {
+        const rt = normType(r.main_property_type);
+        // Match if either is a substring of the other — "multifamily" matches "multifamilyapartments" etc.
+        return rt === mp || rt.includes(mp) || mp.includes(rt);
+      });
     }
     if (Array.isArray(b.owner_types_include) && b.owner_types_include.length) {
       const inc = new Set(b.owner_types_include.map((s) => s.toLowerCase()));
