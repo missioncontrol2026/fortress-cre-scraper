@@ -44,7 +44,8 @@ const routes = [
   { method: 'POST', path: '/reonomy/owner-detail',   handler: reonomy.ownerDetail },
 
   // CoStar
-  { method: 'POST', path: '/costar/buyer-search',    handler: costar.buyerSearch },   // C1/C2/C3 via body.mode
+  { method: 'POST', path: '/costar/buyer-search',    handler: costar.buyerSearch },   // C1/C2/C3 via body.mode (legacy Sale Comps path)
+  { method: 'POST', path: '/costar/owner-search',    handler: costar.ownerSearch },   // C1 real — Owners → Companies
   { method: 'POST', path: '/costar/comps',           handler: costar.comps },         // C4
   { method: 'GET',  path: '/costar/property',        handler: costar.propertyLookup },// C5/C6/C7
   { method: 'POST', path: '/costar/property',        handler: costar.propertyLookup },// alt POST form

@@ -1,22 +1,47 @@
 // CoStar workflows C1-C7. All 7 documented in scraper/SPEC.md.
-// Same selector caveat as Reonomy: all selectors below marked TUNE — validated
-// on first login and locked in.
+// Real DOM captured 2026-07-07 from Alex's live session — see COSTAR-DOM-NOTES.md.
+// URLs are lowercase kebab-case with ?new_search=true (legacy /Search/... paths don't work).
 
 const { newPage, saveState, humanDelay } = require('../lib/browser');
 const { tryConsume, currentUsage, LIMITS } = require('../lib/rateLimit');
 
 const COSTAR_BASE = 'https://product.costar.com';
 
+// Real URLs — captured from live nav 2026-07-07
+const URLS = {
+  ownersCompanies:   `${COSTAR_BASE}/suiteapps/owners/companies?new_search=true`,
+  ownersFunds:       `${COSTAR_BASE}/owners/funds?new_search`,
+  saleComps:         `${COSTAR_BASE}/search/sale-comps/?new_search=true`,
+  leaseActivity:     `${COSTAR_BASE}/suiteapps/lease-activity?new_search=true`,
+  rentBenchmark:     `${COSTAR_BASE}/suiteapps/rent-benchmark?new_search=true`,
+  allProperties:     `${COSTAR_BASE}/search/all-properties/?new_search=true`,
+  multiFamily:       `${COSTAR_BASE}/search/multi-family/?new_search=true`,
+  forSale:           `${COSTAR_BASE}/listings/for-sale?new_search=true`,
+  forLease:          `${COSTAR_BASE}/listings/for-lease?new_search=true`,
+  publicRecord:      `${COSTAR_BASE}/search/public-record?new_search=true`,
+};
+
 // --- login helper ---
-// CoStar has 2FA held by Brent. Interactive login flow lives at
-// /admin/login/costar — this ensureLogin just verifies the cached session.
+// Alex's account has NO 2FA. Cached session persists via Render Disk.
+// Interactive login is `POST /admin/login/costar` — this ensureLogin just verifies.
 async function ensureLogin(page) {
   await page.goto(`${COSTAR_BASE}/`, { waitUntil: 'domcontentloaded' });
+  await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {});
   await humanDelay();
-  const signedIn = await page.$('[data-testid="user-menu"], nav [href*="/search"]'); // TUNE
+  // Real signed-in indicators — captured from live DOM:
+  //   1. Owners tab exists in top nav (only visible when authenticated)
+  //   2. "Add a Listing" button in top right
+  //   3. URL doesn't include /login or secure.costargroup.com
+  const url = page.url();
+  if (url.includes('/login') || url.includes('secure.costargroup.com')) {
+    throw new Error(
+      `CoStar session expired (landed on ${url}). Run POST /admin/login/costar to refresh.`,
+    );
+  }
+  const signedIn = await page.$('button.csg-tui-tab, [data-testid="search-page"]');
   if (signedIn) return true;
   throw new Error(
-    'CoStar session expired. Run POST /admin/login/costar with { code: "<2FA code>" } to refresh.',
+    `CoStar session unclear at ${url}. Run POST /admin/login/costar to refresh.`,
   );
 }
 
@@ -71,7 +96,7 @@ async function buyerSearch(req, res) {
     await ensureLogin(page);
 
     // Navigate to the Sales / Comps module — CoStar calls it Sale Comps.
-    await page.goto(`${COSTAR_BASE}/Search/SaleComps`, { waitUntil: 'domcontentloaded' }); // TUNE
+    await page.goto(URLS.saleComps, { waitUntil: 'domcontentloaded' }); // real URL
     await humanDelay(1500, 2500);
 
     // Property type filter
@@ -148,6 +173,121 @@ async function buyerSearch(req, res) {
   }
 }
 
+// ---------- Workflow C1-real — Buyer research via Owners → Companies ----------
+// POST /costar/owner-search
+// body: {
+//   owner_types_include: ["Investment Manager", "Insurance Company", "Pension Fund"],
+//   owner_types_exclude: ["Public REIT", "Non-Profit", "Government"],
+//   main_property_type: "Industrial",     // or "Multi-Family", "Office", "Retail", "Diversified"
+//   min_portfolio_sf: 100000,             // default is CoStar's "100K+ SF" chip
+//   hq_country: "United States",
+//   result_limit: 25,
+// }
+// Returns: [{ company, hierarchy, owner_type, hq_city, hq_state, hq_country,
+//             property_count, total_sf_owned, avg_sf, main_property_type,
+//             recent_deal_count, avg_deal_value, twelve_month_value, total_value }]
+async function ownerSearch(req, res) {
+  let gate; try { gate = consumeOrThrow(); }
+  catch (e) { return res.status(e.status).json({ error: 'rate_limited', ...e.gate }); }
+  const b = req.body || {};
+  const limit = Math.min(b.result_limit || 20, 100);
+
+  const page = await newPage('costar');
+  try {
+    await ensureLogin(page);
+    await page.goto(URLS.ownersCompanies, { waitUntil: 'domcontentloaded' });
+    await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {});
+    await humanDelay(1500, 2500);
+
+    // Wait for results table to render (CSG table)
+    await page.waitForSelector('table.csg-tw-table tr.csg-tw-table-row', { timeout: 30000 });
+
+    // Owner Type filter (multi-select autocomplete by placeholder)
+    if (Array.isArray(b.owner_types_include) && b.owner_types_include.length) {
+      const ownerTypeInput = page.locator('input[placeholder="Owner Type"]').first();
+      for (const t of b.owner_types_include) {
+        await ownerTypeInput.click();
+        await humanDelay(300, 600);
+        await ownerTypeInput.fill(t);
+        await humanDelay(500, 900);
+        await page.keyboard.press('Enter');
+        await humanDelay(300, 600);
+      }
+      await page.keyboard.press('Escape');
+    }
+
+    // Main Property Type filter
+    if (b.main_property_type) {
+      const propInput = page.locator('input[placeholder="Main Property Type"]').first();
+      await propInput.click();
+      await humanDelay(300, 600);
+      await propInput.fill(b.main_property_type);
+      await humanDelay(500, 900);
+      await page.keyboard.press('Enter');
+      await page.keyboard.press('Escape');
+      await humanDelay(400, 800);
+    }
+
+    // Wait for table refresh after filters
+    await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {});
+    await humanDelay(1200, 2000);
+
+    // Extract rows — positional column indexes per COSTAR-DOM-NOTES.md
+    const rows = await page.$$eval(
+      'table.csg-tw-table tr.csg-tw-table-row',
+      (nodes, n) => {
+        const t = (el) => (el?.textContent || '').trim();
+        return nodes.slice(0, n).map((r) => {
+          const cells = Array.from(r.querySelectorAll('td.csg-tw-table-cell'));
+          if (cells.length < 15) return null;
+          return {
+            company:              t(cells[1]),
+            hierarchy:            t(cells[2]),
+            owner_type:           t(cells[3]),
+            hq_city:              t(cells[4]),
+            hq_state:             t(cells[5]),
+            hq_country:           t(cells[6]),
+            property_count:       Number((t(cells[7]) || '').replace(/[^\d]/g, '')) || null,
+            total_sf_owned:       Number((t(cells[8]) || '').replace(/[^\d]/g, '')) || null,
+            avg_sf:               Number((t(cells[9]) || '').replace(/[^\d]/g, '')) || null,
+            main_property_type:   t(cells[13]),
+            recent_deal_count:    Number((t(cells[19]) || '').replace(/[^\d]/g, '')) || null,
+            avg_deal_value:       t(cells[20]),
+            twelve_month_value:   t(cells[21]),
+            total_value:          t(cells[22]),
+          };
+        }).filter(Boolean);
+      },
+      limit,
+    );
+
+    // Optional post-filter for excluded owner types (CoStar UI doesn't have simple exclude)
+    let filtered = rows;
+    if (Array.isArray(b.owner_types_exclude) && b.owner_types_exclude.length) {
+      const excl = new Set(b.owner_types_exclude.map((s) => s.toLowerCase()));
+      filtered = rows.filter((r) => !excl.has((r.owner_type || '').toLowerCase()));
+    }
+    if (b.hq_country) {
+      filtered = filtered.filter((r) => (r.hq_country || '').toLowerCase() === b.hq_country.toLowerCase());
+    }
+
+    await saveState('costar');
+    res.json({
+      workflow: 'C1',
+      module: 'owners/companies',
+      count: filtered.length,
+      total_before_client_filter: rows.length,
+      rows: filtered,
+      quota_usage: currentUsage('costar'),
+    });
+  } catch (err) {
+    console.error('C1 (owner-search) error:', err);
+    res.status(err.status || 500).json({ error: 'costar_owner_search_failed', message: err.message });
+  } finally {
+    await page.close().catch(() => {});
+  }
+}
+
 // ---------- Workflow C4 — Sales & lease comps for underwriting brief ----------
 // POST /costar/comps
 // body: {
@@ -167,7 +307,7 @@ async function comps(req, res) {
     await ensureLogin(page);
 
     // -- Sales comps --
-    await page.goto(`${COSTAR_BASE}/Search/SaleComps`, { waitUntil: 'domcontentloaded' }); // TUNE
+    await page.goto(URLS.saleComps, { waitUntil: 'domcontentloaded' }); // real URL
     await humanDelay();
     await applyCompFilters(page, b);
     await page.click('[data-action="run-search"]'); // TUNE
@@ -175,7 +315,8 @@ async function comps(req, res) {
     const sales = await extractComps(page, b.sales_limit || 5);
 
     // -- Lease comps --
-    await page.goto(`${COSTAR_BASE}/Search/LeaseComps`, { waitUntil: 'domcontentloaded' }); // TUNE
+    // CoStar doesn't have a "Lease Comps" module — use Lease Activity + For Lease
+    await page.goto(URLS.leaseActivity, { waitUntil: 'domcontentloaded' });
     await humanDelay();
     await applyCompFilters(page, b);
     await page.click('[data-action="run-search"]'); // TUNE
@@ -232,9 +373,14 @@ async function propertyLookup(req, res) {
   const page = await newPage('costar');
   try {
     await ensureLogin(page);
-    await page.goto(`${COSTAR_BASE}/Search/Property?q=${encodeURIComponent(address)}`, { // TUNE
-      waitUntil: 'domcontentloaded',
-    });
+    // Real property lookup: use All Properties search with Location filter
+    await page.goto(URLS.allProperties, { waitUntil: 'domcontentloaded' });
+    await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {});
+    // Type into location filter (placeholder "Location") and pick first result
+    const locInput = await page.locator('input[placeholder="Location"]').first();
+    await locInput.fill(address);
+    await humanDelay(700, 1200);
+    await page.keyboard.press('Enter');
     await humanDelay();
     await page.click(`[data-testid="results-row"]:first-of-type`); // TUNE
     await page.waitForLoadState('domcontentloaded');
@@ -349,6 +495,7 @@ function quota(req, res) {
 
 module.exports = {
   buyerSearch,
+  ownerSearch,
   comps,
   propertyLookup,
   loginCostar,
