@@ -27,28 +27,49 @@ const SUBTAB_FOR = {
 // ---------- Login (Auth0) ----------
 async function ensureLogin(page) {
   await page.goto(`${REONOMY_BASE}/!/home`, { waitUntil: 'domcontentloaded' });
-  await humanDelay(1200, 2200);
-  // Signed-in indicator: the Reonomy search input is present on /!/home
-  if (await page.$('input[placeholder*="Search by address"], input[placeholder*="Address"]')) {
-    await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
-    return true;
+  await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {});
+  await humanDelay(2500, 4000);
+
+  // Broad signed-in detection: search input, nav sidebar, or any auth-only element.
+  const signedInMarkers = [
+    'input[placeholder*="Search by address"]',
+    'input[placeholder*="Address"]',
+    '[data-testid="AdvancedSearch"]',
+    'button:has-text("Advanced Search")',
+    '[data-testid="sidebar"]',
+    'nav a:has-text("Search")',
+  ];
+  for (const sel of signedInMarkers) {
+    if (await page.$(sel).catch(() => null)) return true;
+  }
+  // If URL never left app.reonomy.com, the SPA is up; treat as signed-in.
+  if (page.url().includes('app.reonomy.com')) {
+    // Wait a beat for SPA to settle, then confirm we aren't on a login CTA
+    await humanDelay(1500, 2500);
+    const loginCta = await page.$('a:has-text("Sign in"), a:has-text("Log in"), button:has-text("Sign in")').catch(() => null);
+    if (!loginCta) return true;
   }
 
   const email = process.env.REONOMY_EMAIL;
   const password = process.env.REONOMY_PASSWORD;
-  if (!email || !password) {
-    throw new Error('REONOMY_EMAIL/PASSWORD not set — cannot log in');
-  }
+  if (!email || !password) throw new Error('REONOMY_EMAIL/PASSWORD not set - cannot log in');
 
-  // Auth0's tenant is auth.reonomy.com — we get redirected there automatically.
-  await page.waitForSelector('input[name="email"], input[type="email"]', { timeout: 20000 });
-  await page.fill('input[name="email"], input[type="email"]', email);
-  await humanDelay(300, 700);
+  // Wait for Auth0 form. Try more selectors + longer timeout.
+  await page.waitForSelector('input[name="email"], input[name="username"], input[type="email"], input[id*="email" i]', { timeout: 30000 });
+  await page.fill('input[name="email"], input[name="username"], input[type="email"], input[id*="email" i]', email);
+  await humanDelay(400, 900);
+  // Auth0 sometimes needs a Continue click before password shows.
+  const cont = page.locator('button:has-text("Continue"), button:has-text("Next")').first();
+  if (await cont.isVisible().catch(() => false)) {
+    await cont.click();
+    await humanDelay(600, 1200);
+  }
+  await page.waitForSelector('input[name="password"], input[type="password"]', { timeout: 15000 });
   await page.fill('input[name="password"], input[type="password"]', password);
-  await humanDelay(300, 700);
-  await page.click('button[type="submit"]');
-  await page.waitForURL(/app\.reonomy\.com/, { timeout: 45000 });
-  await humanDelay(1000, 1600);
+  await humanDelay(400, 900);
+  await page.click('button[type="submit"], button:has-text("Sign In"), button:has-text("Log In")');
+  await page.waitForURL(/app\.reonomy\.com/, { timeout: 60000 });
+  await humanDelay(1500, 2500);
   await saveState('reonomy');
   return true;
 }
