@@ -29,9 +29,13 @@ function readBody(req) {
   });
 }
 function requireAuth(req, res) {
-  const got = req.headers['authorization'] || '';
-  const want = `Bearer ${PROXY_API_KEY}`;
-  if (got !== want) { json(res, 401, { error: 'unauthorized' }); return false; }
+  const got = (req.headers['authorization'] || '').trim();
+  // Accept both "Bearer <key>" and just "<key>" — different clients send it differently.
+  const cleaned = got.replace(/^Bearer\s+/i, "").trim();
+  if (cleaned !== PROXY_API_KEY) {
+    console.log("[auth] rejected. header preview:", got.slice(0, 30));
+    json(res, 401, { error: "unauthorized" }); return false;
+  }
   return true;
 }
 
