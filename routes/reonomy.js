@@ -352,14 +352,14 @@ async function savedSearch(req, res) {
       cookies = (parsed.cookies || [])
         .filter((c) => c.name && c.value)
         .map((c) => `${c.name}=${c.value}`)
-        .join(';');
+        .join('; ');
     } catch {}
 
     const targetUrl = `${REONOMY_BASE}/!/search/${uuid}`;
     const params = new URLSearchParams({
       api_key: key,
       url: targetUrl,
-      premium_proxy: 'true',
+      stealth_proxy: 'true',
       country_code: 'us',
       render_js: 'true',
       wait_browser: 'networkidle2',

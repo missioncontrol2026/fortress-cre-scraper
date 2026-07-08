@@ -228,7 +228,7 @@ async function ownerSearch(req, res) {
       cookies = (parsed.cookies || [])
         .filter((c) => c.name && c.value)
         .map((c) => `${c.name}=${c.value}`)
-        .join(';');
+        .join('; ');
     } catch {}
     let extraHeaders = {};
     try {
@@ -240,7 +240,7 @@ async function ownerSearch(req, res) {
     const params = new URLSearchParams({
       api_key: key,
       url: 'https://product.costar.com/suiteapps/owners/graphql',
-      premium_proxy: 'true',
+      stealth_proxy: 'true',
       country_code: 'us',
       render_js: 'false',
       forward_headers: 'true',
