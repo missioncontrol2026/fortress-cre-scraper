@@ -193,73 +193,175 @@ async function ownerSearch(req, res) {
   const b = req.body || {};
   const limit = Math.min(b.result_limit || 20, 100);
 
-  // Route through extension bridge queue
-  const queue = require('./queue');
-  const jobId = queue._enqueueDirect({
-    vendor: 'costar',
-    params: {
-      limit,
-      min_portfolio_sf: b.min_portfolio_sf || 100000,
-      main_property_type: b.main_property_type,
-      owner_types_include: b.owner_types_include,
-      owner_types_exclude: b.owner_types_exclude,
-    },
-  });
+  const query = `query CompaniesSearch($searchRequest: CompaniesSearchRequestInput!) {
+  companies {
+    companiesSearchWithList(searchRequest: $searchRequest) {
+      data {
+        id
+        companyKey
+        locationName
+        hierarchy
+        ownerType
+        cityId
+        stateId
+        countryCode
+        countryId
+        numberOfProperties
+        buildingSqFtTotal
+        averageSqFtTotal
+        primaryPropertyType
+        acquistitions
+        dispositions
+        forSalePriceTotal
+        numberOfForSales
+        continentalFocus
+        territory
+      }
+    }
+  }
+}`;
 
-  const timeoutMs = 90000;
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    const entry = queue._getJob(jobId);
-    if (entry && entry.status === 'done') {
-      const raw = entry.result;
-      if (!raw) return res.status(502).json({ error: 'costar_no_data', message: 'extension returned empty' });
-      if (raw.status && raw.status !== 200) return res.status(502).json({ error: 'costar_extension_error', status: raw.status, body: (raw.body || '').slice(0, 800) });
-      let parsed;
-      try { parsed = typeof raw.body === 'string' ? JSON.parse(raw.body) : raw.body; }
-      catch { return res.status(502).json({ error: 'costar_parse_error', body: (raw.body || '').slice(0, 400) }); }
-      const rawList = parsed.data?.companies?.companiesSearchWithList?.data || [];
-      let rows = rawList.map((r) => ({
-        company: r.locationName,
-        hierarchy: r.hierarchy,
-        owner_type: r.ownerType,
-        hq_city: r.cityId,
-        hq_state: r.stateId,
-        hq_country: r.countryCode || r.countryId,
-        property_count: Number((r.numberOfProperties || '').toString().replace(/[^\d]/g, '')) || null,
-        total_sf_owned: Number((r.buildingSqFtTotal || '').toString().replace(/[^\d]/g, '')) || null,
-        avg_sf: Number((r.averageSqFtTotal || '').toString().replace(/[^\d]/g, '')) || null,
-        main_property_type: r.primaryPropertyType,
-        recent_deal_count: Number((r.numberOfForSales || '').toString().replace(/[^\d]/g, '')) || null,
-        avg_deal_value: r.forSalePriceTotal,
-        twelve_month_value: r.acquistitions,
-        total_value: r.dispositions,
-        company_key: r.companyKey,
-      }));
-      if (b.main_property_type) {
-        const mp = b.main_property_type.toLowerCase();
-        rows = rows.filter((r) => (r.main_property_type || '').toLowerCase() === mp);
-      }
-      if (Array.isArray(b.owner_types_include) && b.owner_types_include.length) {
-        const inc = new Set(b.owner_types_include.map((s) => s.toLowerCase()));
-        rows = rows.filter((r) => inc.has((r.owner_type || '').toLowerCase()));
-      }
-      if (Array.isArray(b.owner_types_exclude) && b.owner_types_exclude.length) {
-        const excl = new Set(b.owner_types_exclude.map((s) => s.toLowerCase()));
-        rows = rows.filter((r) => !excl.has((r.owner_type || '').toLowerCase()));
-      }
-      rows = rows.slice(0, limit);
-      return res.json({
-        workflow: 'C1',
-        module: 'owners/companies (extension bridge)',
-        count: rows.length,
-        rows,
-        quota_usage: currentUsage('costar'),
+  // Build searchCriteria with all available filters
+  const searchCriteria = {
+    portfolio: {
+      buildingAreaSqFtTotal: {
+        minimum: b.min_portfolio_sf || 100000,
+        ...(b.max_portfolio_sf ? { maximum: b.max_portfolio_sf } : {}),
+      },
+      numberOfPropertiesTotal: {
+        minimum: b.min_property_count || 25,
+        ...(b.max_property_count ? { maximum: b.max_property_count } : {}),
+      },
+    },
+    sortType: 0,
+  };
+  // Fetch more rows when the caller asks for geographic or property-type filters
+  // because client-side filtering can shrink the result set considerably.
+  const oversample = (b.include_hq_cities?.length || b.include_hq_states?.length || b.main_property_type) ? 5 : 2;
+  const variables = {
+    searchRequest: {
+      pageNumber: 1,
+      pageSize: Math.min(Math.max(limit * oversample, 40), 100),
+      searchCriteria,
+    },
+  };
+
+  // Run the GraphQL fetch from inside the actual SPA context. This uses the
+  // real Chromium TLS fingerprint, all cookies the browser has, and any
+  // request-signing the SPA installs. Bypasses CoStar's "Non-interactive route"
+  // 401 that curl-impersonate hits.
+  const page = await newPage('costar');
+  try {
+    await ensureLogin(page, URLS.ownersCompanies);
+    await humanDelay(1500, 2500);
+
+    // Load extra headers (cs-owners-formatting-prefs JWT) from imported session
+    const path = require('path');
+    const fs = require('fs');
+    const SESSIONS_DIR = process.env.SESSIONS_DIR || '/app/sessions';
+    let extraHeaders = {};
+    try {
+      const hf = path.join(SESSIONS_DIR, 'costar.headers.json');
+      if (fs.existsSync(hf)) extraHeaders = JSON.parse(fs.readFileSync(hf, 'utf8'));
+    } catch {}
+
+    const r = await page.evaluate(async ({ query, variables, extraHeaders }) => {
+      const headers = { 'Content-Type': 'application/json', ...extraHeaders };
+      const resp = await fetch('/suiteapps/owners/graphql', {
+        method: 'POST',
+        credentials: 'include',
+        headers,
+        body: JSON.stringify({ query, variables, operationName: 'CompaniesSearch' }),
+      });
+      const text = await resp.text();
+      return { status: resp.status, text };
+    }, { query, variables, extraHeaders });
+
+    if (r.status !== 200) {
+      return res.status(502).json({ error: 'costar_graphql_error', status: r.status, body: (r.text || '').slice(0, 800) });
+    }
+    const parsed = JSON.parse(r.text);
+    if (parsed.errors) {
+      return res.status(502).json({ error: 'costar_graphql_errors', errors: parsed.errors });
+    }
+    const raw = parsed.data?.companies?.companiesSearchWithList?.data || [];
+    let rows = raw.map((r) => ({
+      company:            r.locationName,
+      hierarchy:          r.hierarchy,
+      owner_type:         r.ownerType,
+      hq_city:            r.cityId,
+      hq_state:           r.stateId,
+      hq_country:         r.countryCode || r.countryId,
+      property_count:     Number((r.numberOfProperties || '').replace(/[^\d]/g, '')) || null,
+      total_sf_owned:     Number((r.buildingSqFtTotal || '').replace(/[^\d]/g, '')) || null,
+      avg_sf:             Number((r.averageSqFtTotal || '').replace(/[^\d]/g, '')) || null,
+      main_property_type: r.primaryPropertyType,
+      recent_deal_count:  Number((r.numberOfForSales || '').replace(/[^\d]/g, '')) || null,
+      avg_deal_value:     r.forSalePriceTotal,
+      twelve_month_value: r.acquistitions,
+      total_value:        r.dispositions,
+      continental_focus:  r.continentalFocus,
+      territory:          r.territory,
+      company_key:        r.companyKey,
+    }));
+    let filtered = rows;
+    if (b.main_property_type) {
+      const mp = b.main_property_type.toLowerCase();
+      filtered = filtered.filter((r) => (r.main_property_type || '').toLowerCase() === mp);
+    }
+    if (Array.isArray(b.owner_types_include) && b.owner_types_include.length) {
+      const inc = new Set(b.owner_types_include.map((s) => s.toLowerCase()));
+      filtered = filtered.filter((r) => inc.has((r.owner_type || '').toLowerCase()));
+    }
+    if (Array.isArray(b.owner_types_exclude) && b.owner_types_exclude.length) {
+      const excl = new Set(b.owner_types_exclude.map((s) => s.toLowerCase()));
+      filtered = filtered.filter((r) => !excl.has((r.owner_type || '').toLowerCase()));
+    }
+    if (b.hq_country) {
+      filtered = filtered.filter((r) => (r.hq_country || '').toLowerCase() === b.hq_country.toLowerCase());
+    }
+    // Geographic filters — HQ state and HQ city (client-side). CoStar's Companies
+    // API returns cityId/stateId as strings that in practice include the city name
+    // in some tenants — treat them as opaque tokens and match substring.
+    if (Array.isArray(b.include_hq_states) && b.include_hq_states.length) {
+      const inc = new Set(b.include_hq_states.map((s) => String(s).toUpperCase()));
+      filtered = filtered.filter((r) => {
+        const s = String(r.hq_state || '').toUpperCase();
+        return [...inc].some((v) => s === v || s.includes(v));
       });
     }
-    await new Promise(r => setTimeout(r, 500));
+    if (Array.isArray(b.include_hq_cities) && b.include_hq_cities.length) {
+      const inc = b.include_hq_cities.map((s) => String(s).toLowerCase());
+      filtered = filtered.filter((r) => {
+        const c = String(r.hq_city || '').toLowerCase();
+        return inc.some((v) => c === v || c.includes(v));
+      });
+    }
+    // Portfolio size ceiling (server side handles floor)
+    if (b.max_property_count) {
+      filtered = filtered.filter((r) => (r.property_count || 0) <= b.max_property_count);
+    }
+    if (b.max_portfolio_sf) {
+      filtered = filtered.filter((r) => (r.total_sf_owned || 0) <= b.max_portfolio_sf);
+    }
+    filtered = filtered.slice(0, limit);
+
+    res.json({
+      workflow: 'C1',
+      module: 'owners/companies (graphql via SPA)',
+      count: filtered.length,
+      total_before_client_filter: rows.length,
+      rows: filtered,
+      quota_usage: currentUsage('costar'),
+    });
+  } catch (err) {
+    console.error('C1 (owner-search) error:', err);
+    res.status(err.status || 500).json({ error: 'costar_owner_search_failed', message: err.message });
+  } finally {
+    await page.close().catch(() => {});
   }
-  return res.status(504).json({ error: 'costar_extension_timeout', message: 'browser extension did not return in time - is Chrome open with CoStar signed in?' });
 }
+
 // ---------- Workflow C4 — Sales & lease comps for underwriting brief ----------
 // POST /costar/comps
 // body: {
