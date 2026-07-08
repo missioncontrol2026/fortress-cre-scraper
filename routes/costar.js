@@ -199,8 +199,22 @@ async function ownerSearch(req, res) {
     await ensureLogin(page, URLS.ownersCompanies);
     await humanDelay(1500, 2500);
 
-    // Wait for results table to render (CSG table)
-    await page.waitForSelector('table.csg-tw-table tr.csg-tw-table-row', { timeout: 30000 });
+    // Wait for results table to render (CSG table). If it doesn't render, dump diagnostics.
+    try {
+      await page.waitForSelector('table.csg-tw-table tr.csg-tw-table-row', { timeout: 30000 });
+    } catch (waitErr) {
+      const diag = await page.evaluate(() => ({
+        url: location.href,
+        title: document.title,
+        headText: (document.querySelector('h1, h2')?.textContent || '').slice(0, 120),
+        bodyChars: document.body.innerText.length,
+        bodyPreview: document.body.innerText.slice(0, 500),
+        hasTable: !!document.querySelector('table'),
+        hasCsgTable: !!document.querySelector('table.csg-tw-table'),
+        rowCount: document.querySelectorAll('tr').length,
+      }));
+      throw new Error(`table did not render — diag: ${JSON.stringify(diag)}`);
+    }
 
     // Owner Type filter (multi-select autocomplete by placeholder)
     if (Array.isArray(b.owner_types_include) && b.owner_types_include.length) {
