@@ -5,6 +5,7 @@ const http = require('http');
 const url = require('url');
 
 const reonomy = require('./routes/reonomy');
+const queue = require('./routes/queue');
 const costar  = require('./routes/costar');
 
 const { PROXY_API_KEY, PORT = 10000 } = process.env;
@@ -41,6 +42,12 @@ const routes = [
 
   // Reonomy
   { method: 'POST', path: '/reonomy/property-list',  handler: reonomy.propertyList },
+  // Chrome extension bridge queue
+  { method: 'POST', path: '/queue/enqueue', handler: queue.enqueue },
+  { method: 'GET',  path: '/queue/pull',    handler: queue.pull },
+  { method: 'POST', path: '/queue/deliver', handler: queue.deliver },
+  { method: 'GET',  path: '/queue/status',  handler: queue.status },
+  { method: 'GET',  path: '/queue/wait',    handler: queue.waitFor },
   { method: 'POST', path: '/reonomy/owner-detail',   handler: reonomy.ownerDetail },
   { method: 'POST', path: '/reonomy/saved-search',   handler: reonomy.savedSearch },
 
