@@ -133,7 +133,7 @@ async function propertyList(req, res) {
     }
 
     // 2. Open the More Filters modal — wait patiently, the button renders after the SPA hydrates.
-    const moreFilters = page.locator('button:has-text("More Filters")').first();
+    const moreFilters = page.locator('[data-testid="more-filters-button"], button:has-text("More Filters")').first();
     await moreFilters.waitFor({ state: 'visible', timeout: 45000 });
     await moreFilters.click();
     await humanDelay(700, 1200);

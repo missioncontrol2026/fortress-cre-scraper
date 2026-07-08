@@ -253,7 +253,8 @@ async function ownerSearch(req, res) {
       }
     });
 
-    await ensureLogin(page, URLS.ownersCompanies);
+    // Load the base URL (last-saved search auto-fires the SPA's graphql on hydration).
+    await ensureLogin(page, 'https://product.costar.com/suiteapps/owners/companies');
     await page.waitForLoadState('networkidle', { timeout: 45000 }).catch(() => {});
     await humanDelay(2500, 4500);
 
