@@ -344,7 +344,7 @@ async function savedSearch(req, res) {
     const apiResponses = [];
     page.on('response', async (resp) => {
       const u = resp.url();
-      if (u.includes('api.reonomy.com/v2') && (u.includes('search') || u.includes('summary'))) {
+      if (u.includes('api.reonomy.com/v2')) {
         try {
           const status = resp.status();
           const text = await resp.text();
