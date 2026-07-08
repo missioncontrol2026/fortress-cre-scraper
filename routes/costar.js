@@ -234,37 +234,34 @@ async function ownerSearch(req, res) {
     },
   };
 
-  // Run the GraphQL fetch from inside the actual SPA context. This uses the
-  // real Chromium TLS fingerprint, all cookies the browser has, and any
-  // request-signing the SPA installs. Bypasses CoStar's "Non-interactive route"
-  // 401 that curl-impersonate hits.
+  // Intercept the SPA's OWN GraphQL responses. Akamai's bot-detection JS runs
+  // against the SPA's fetches (which pass); explicit fetch() from page.evaluate()
+  // is treated as scraping and blocked with 403. By listening for the response
+  // the SPA fires when it loads the search page with its default filters, we
+  // capture data through the trusted (SPA-native) path.
   const page = await newPage('costar');
   try {
+    const graphqlResponses = [];
+    page.on('response', async (resp) => {
+      const url = resp.url();
+      if (url.includes('/suiteapps/owners/graphql') && resp.request().method() === 'POST') {
+        try {
+          const status = resp.status();
+          const text = await resp.text();
+          graphqlResponses.push({ status, text });
+        } catch {}
+      }
+    });
+
     await ensureLogin(page, URLS.ownersCompanies);
-    await humanDelay(1500, 2500);
+    await page.waitForLoadState('networkidle', { timeout: 45000 }).catch(() => {});
+    await humanDelay(2500, 4500);
 
-    // Load extra headers (cs-owners-formatting-prefs JWT) from imported session
-    const path = require('path');
-    const fs = require('fs');
-    const SESSIONS_DIR = process.env.SESSIONS_DIR || '/app/sessions';
-    let extraHeaders = {};
-    try {
-      const hf = path.join(SESSIONS_DIR, 'costar.headers.json');
-      if (fs.existsSync(hf)) extraHeaders = JSON.parse(fs.readFileSync(hf, 'utf8'));
-    } catch {}
-
-    const r = await page.evaluate(async ({ query, variables, extraHeaders }) => {
-      const headers = { 'Content-Type': 'application/json', ...extraHeaders };
-      const resp = await fetch('/suiteapps/owners/graphql', {
-        method: 'POST',
-        credentials: 'include',
-        headers,
-        body: JSON.stringify({ query, variables, operationName: 'CompaniesSearch' }),
-      });
-      const text = await resp.text();
-      return { status: resp.status, text };
-    }, { query, variables, extraHeaders });
-
+    // Prefer the last 200 that contains companiesSearchWithList payload
+    const r = graphqlResponses.slice().reverse().find(x => x.status === 200 && x.text.includes('companiesSearchWithList')) || graphqlResponses[0];
+    if (!r) {
+      return res.status(502).json({ error: 'costar_no_response', message: 'SPA did not fire a companies GraphQL query within timeout', capturedCount: graphqlResponses.length });
+    }
     if (r.status !== 200) {
       return res.status(502).json({ error: 'costar_graphql_error', status: r.status, body: (r.text || '').slice(0, 800) });
     }
