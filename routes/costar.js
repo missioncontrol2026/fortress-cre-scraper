@@ -491,6 +491,60 @@ async function loginCostar(req, res) {
   }
 }
 
+// Import a CoStar session captured from a real browser (bypasses Akamai bot detection).
+// POST /admin/import-costar-session
+// body: { cookies: [{ name, value, domain, path, expires, httpOnly, secure, sameSite }], origins?: [{ origin, localStorage: [{name, value}] }] }
+// Writes to /app/sessions/costar.storage.json so next `newPage('costar')` uses it.
+async function importCostarSession(req, res) {
+  const path = require('path');
+  const fs   = require('fs');
+  const b = req.body || {};
+  const cookies = Array.isArray(b.cookies) ? b.cookies : null;
+  if (!cookies || !cookies.length) return res.status(400).json({ error: 'cookies array required' });
+
+  // Normalize each cookie into Playwright storage_state format
+  const normalized = cookies.map((c) => ({
+    name:     c.name,
+    value:    c.value,
+    domain:   c.domain    || '.costar.com',
+    path:     c.path      || '/',
+    expires:  typeof c.expires === 'number' ? c.expires : -1,
+    httpOnly: c.httpOnly === true,
+    secure:   c.secure !== false,
+    sameSite: c.sameSite || 'Lax',
+  }));
+
+  const storageState = {
+    cookies:  normalized,
+    origins:  Array.isArray(b.origins) ? b.origins : [],
+  };
+
+  const SESSIONS_DIR = process.env.SESSIONS_DIR || '/app/sessions';
+  fs.mkdirSync(SESSIONS_DIR, { recursive: true });
+  const outFile = path.join(SESSIONS_DIR, 'costar.storage.json');
+  fs.writeFileSync(outFile, JSON.stringify(storageState, null, 0));
+
+  // Also seed the persistent context userDataDir with these cookies so the FIRST
+  // page.goto after this import already has them. Playwright's launchPersistentContext
+  // reads cookies from Cookies file — simplest way: launch context, addCookies, close.
+  try {
+    const { chromium } = require('patchright');
+    const userDataDir = path.join(SESSIONS_DIR, 'costar-userdata');
+    fs.mkdirSync(userDataDir, { recursive: true });
+    const ctx = await chromium.launchPersistentContext(userDataDir, {
+      channel: 'chromium', headless: true, viewport: null,
+      locale: 'en-US', timezoneId: 'America/Chicago',
+      args: ['--disable-dev-shm-usage', '--no-sandbox'],
+    });
+    await ctx.addCookies(normalized);
+    await ctx.close();
+  } catch (seedErr) {
+    console.error('cookie seed to userDataDir failed:', seedErr.message);
+  }
+
+  res.json({ ok: true, cookieCount: normalized.length, storageStatePath: outFile });
+}
+
 // Same for Reonomy (Auth0 usually just needs email+password, no 2FA)
 async function loginReonomy(req, res) {
   const { ensureLogin } = require('./reonomy');
@@ -521,5 +575,6 @@ module.exports = {
   propertyLookup,
   loginCostar,
   loginReonomy,
+  importCostarSession,
   quota,
 };

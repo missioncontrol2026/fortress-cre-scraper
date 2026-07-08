@@ -50,9 +50,10 @@ const routes = [
   { method: 'GET',  path: '/costar/property',        handler: costar.propertyLookup },// C5/C6/C7
   { method: 'POST', path: '/costar/property',        handler: costar.propertyLookup },// alt POST form
 
-  // Admin (login refresh)
-  { method: 'POST', path: '/admin/login/costar',     handler: costar.loginCostar },
-  { method: 'POST', path: '/admin/login/reonomy',    handler: costar.loginReonomy },
+  // Admin (login refresh + real-browser session import)
+  { method: 'POST', path: '/admin/login/costar',              handler: costar.loginCostar },
+  { method: 'POST', path: '/admin/login/reonomy',             handler: costar.loginReonomy },
+  { method: 'POST', path: '/admin/import-costar-session',     handler: costar.importCostarSession },
 ];
 
 // Attach Express-style helpers so route handlers can use res.status().json() and res.json().
