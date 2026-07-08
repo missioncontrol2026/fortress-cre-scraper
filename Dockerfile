@@ -4,13 +4,17 @@ FROM mcr.microsoft.com/playwright:v1.61.1-jammy
 
 WORKDIR /app
 
-# Copy manifest and install deps.
-# 1) First install everything --ignore-scripts (skips playwright's Chromium download since the base image has it)
-# 2) Then RE-install koffi+impers with scripts enabled so koffi's native module builds/downloads properly.
+# Install curl-impersonate binary for Chrome TLS spoofing (used to defeat Akamai
+# without needing to launch a real Chromium). Downloaded from official releases.
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates wget && \
+    wget -qO /tmp/curl-impersonate.tar.gz \
+      "https://github.com/lwthiker/curl-impersonate/releases/download/v0.6.1/curl-impersonate-v0.6.1.x86_64-linux-gnu.tar.gz" && \
+    tar -xzf /tmp/curl-impersonate.tar.gz -C /usr/local/bin/ && \
+    rm /tmp/curl-impersonate.tar.gz && \
+    /usr/local/bin/curl_chrome124 --version 2>&1 | head -1 || echo "curl-impersonate installed"
+
 COPY package.json ./
 RUN npm install --omit=optional --ignore-scripts
-RUN npm rebuild koffi
-RUN npm install koffi impers --force
 
 # Copy source
 COPY . .
