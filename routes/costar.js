@@ -192,7 +192,6 @@ async function ownerSearch(req, res) {
   catch (e) { return res.status(e.status).json({ error: 'rate_limited', ...e.gate }); }
   const b = req.body || {};
   const limit = Math.min(b.result_limit || 20, 100);
-  const { graphql } = require('../lib/costarGql');
 
   const query = `query CompaniesSearch($searchRequest: CompaniesSearchRequestInput!) {
   companies {
@@ -224,7 +223,7 @@ async function ownerSearch(req, res) {
   const variables = {
     searchRequest: {
       pageNumber: 1,
-      pageSize: Math.min(Math.max(limit * 2, 20), 100),  // fetch more than limit so we can filter client-side
+      pageSize: Math.min(Math.max(limit * 2, 20), 100),
       searchCriteria: {
         portfolio: {
           buildingAreaSqFtTotal: { minimum: b.min_portfolio_sf || 100000 },
@@ -235,15 +234,39 @@ async function ownerSearch(req, res) {
     },
   };
 
+  // Run the GraphQL fetch from inside the actual SPA context. This uses the
+  // real Chromium TLS fingerprint, all cookies the browser has, and any
+  // request-signing the SPA installs. Bypasses CoStar's "Non-interactive route"
+  // 401 that curl-impersonate hits.
+  const page = await newPage('costar');
   try {
-    const r = await graphql({
-      endpoint: 'https://product.costar.com/suiteapps/owners/graphql',
-      query,
-      variables,
-      operationName: 'CompaniesSearch',
-    });
+    await ensureLogin(page, URLS.ownersCompanies);
+    await humanDelay(1500, 2500);
+
+    // Load extra headers (cs-owners-formatting-prefs JWT) from imported session
+    const path = require('path');
+    const fs = require('fs');
+    const SESSIONS_DIR = process.env.SESSIONS_DIR || '/app/sessions';
+    let extraHeaders = {};
+    try {
+      const hf = path.join(SESSIONS_DIR, 'costar.headers.json');
+      if (fs.existsSync(hf)) extraHeaders = JSON.parse(fs.readFileSync(hf, 'utf8'));
+    } catch {}
+
+    const r = await page.evaluate(async ({ query, variables, extraHeaders }) => {
+      const headers = { 'Content-Type': 'application/json', ...extraHeaders };
+      const resp = await fetch('/suiteapps/owners/graphql', {
+        method: 'POST',
+        credentials: 'include',
+        headers,
+        body: JSON.stringify({ query, variables, operationName: 'CompaniesSearch' }),
+      });
+      const text = await resp.text();
+      return { status: resp.status, text };
+    }, { query, variables, extraHeaders });
+
     if (r.status !== 200) {
-      return res.status(502).json({ error: 'costar_graphql_error', status: r.status, body: r.text.slice(0, 800) });
+      return res.status(502).json({ error: 'costar_graphql_error', status: r.status, body: (r.text || '').slice(0, 800) });
     }
     const parsed = JSON.parse(r.text);
     if (parsed.errors) {
@@ -289,7 +312,7 @@ async function ownerSearch(req, res) {
 
     res.json({
       workflow: 'C1',
-      module: 'owners/companies (graphql)',
+      module: 'owners/companies (graphql via SPA)',
       count: filtered.length,
       total_before_client_filter: rows.length,
       rows: filtered,
@@ -298,6 +321,8 @@ async function ownerSearch(req, res) {
   } catch (err) {
     console.error('C1 (owner-search) error:', err);
     res.status(err.status || 500).json({ error: 'costar_owner_search_failed', message: err.message });
+  } finally {
+    await page.close().catch(() => {});
   }
 }
 
