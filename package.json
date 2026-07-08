@@ -9,6 +9,7 @@
     "postinstall": "npx playwright install --with-deps chromium"
   },
   "dependencies": {
-    "playwright": "1.61.1"
+    "playwright": "1.61.1",
+    "patchright": "1.61.1"
   }
 }
