@@ -66,6 +66,15 @@ function decorate(res) {
 const server = http.createServer(async (req, res) => {
   const parsed = url.parse(req.url, true);
   const path = parsed.pathname;
+
+  // CORS: allow the browser-side cookie-import flow from any CoStar tab.
+  // Only /admin/import-costar-session ever needs cross-origin — auth is still
+  // enforced via the Bearer header regardless of origin.
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  if (req.method === 'OPTIONS') { res.writeHead(204); return res.end(); }
+
   const route = routes.find((r) => r.method === req.method && r.path === path);
   decorate(res);
 
