@@ -339,49 +339,81 @@ async function savedSearch(req, res) {
   const limit = Number(b.limit) || 25;
   if (!uuid) return res.status(400).json({ error: 'search_uuid required' });
 
-  const page = await newPage('reonomy');
   try {
-    const apiResponses = [];
-    page.on('response', async (resp) => {
-      const u = resp.url();
-      if (u.includes('api.reonomy.com/v2')) {
-        try {
-          const status = resp.status();
-          const text = await resp.text();
-          apiResponses.push({ url: u, status, text });
-        } catch {}
-      }
+    const key = process.env.SCRAPINGBEE_API_KEY;
+    if (!key) return res.status(500).json({ error: 'SCRAPINGBEE_API_KEY not set' });
+    const path = require('path');
+    const fs = require('fs');
+    const SESSIONS_DIR = process.env.SESSIONS_DIR || '/app/sessions';
+    let cookies = '';
+    try {
+      const raw = fs.readFileSync(path.join(SESSIONS_DIR, 'reonomy.storage.json'), 'utf8');
+      const parsed = JSON.parse(raw);
+      cookies = (parsed.cookies || [])
+        .filter((c) => c.name && c.value)
+        .map((c) => `${c.name}=${c.value}`)
+        .join(';');
+    } catch {}
+
+    const targetUrl = `${REONOMY_BASE}/!/search/${uuid}`;
+    const params = new URLSearchParams({
+      api_key: key,
+      url: targetUrl,
+      premium_proxy: 'true',
+      country_code: 'us',
+      render_js: 'true',
+      wait_browser: 'networkidle2',
+      wait: '5000',
+      return_page_source: 'true',
+    });
+    if (cookies) params.set('cookies', cookies);
+
+    const https = require('https');
+    const r = await new Promise((resolve, reject) => {
+      const req = https.get('https://app.scrapingbee.com/api/v1/?' + params.toString(),
+        { timeout: 120000 },
+        (resp) => {
+          let text = '';
+          resp.on('data', (c) => text += c);
+          resp.on('end', () => resolve({ status: resp.statusCode, text }));
+        });
+      req.on('error', reject);
+      req.on('timeout', () => req.destroy(new Error('timeout')));
     });
 
-    await page.goto(`${REONOMY_BASE}/!/search/${uuid}`, { waitUntil: 'domcontentloaded', timeout: 45000 });
-    await page.waitForLoadState('networkidle', { timeout: 60000 }).catch(() => {});
-    await humanDelay(3000, 5000);
+    if (r.status !== 200) {
+      return res.status(502).json({ error: 'reonomy_scrapingbee_error', status: r.status, body: (r.text || '').slice(0, 800) });
+    }
 
-    // Find the properties/summary response
-    const summary = apiResponses.reverse().find(r => r.status === 200 && (r.text.includes('property') || r.text.includes('address')));
-    if (!summary) {
-      return res.status(502).json({
-        error: 'reonomy_no_data',
-        message: 'Loaded saved search but no property data intercepted',
-        capturedCount: apiResponses.length,
-        urls: apiResponses.map(r => r.url).slice(0, 10),
+    // Extract MUI Card property cards from rendered HTML.
+    // Each card contains: address, size, sale info, owner name.
+    const html = r.text;
+    const cardMatches = html.match(/<div[^>]*class="[^"]*MuiPaper-root[^"]*MuiCard-root[^"]*"[^>]*>[\s\S]*?<\/div>\s*<\/div>/g) || [];
+    const rows = [];
+    for (const card of cardMatches.slice(0, limit)) {
+      const text = card.replace(/<[^>]+>/g, '\n').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').split('\n').map(l => l.trim()).filter(Boolean);
+      if (text.length < 3) continue;
+      rows.push({
+        address: text[0] || '',
+        size_line: text[1] || '',
+        detail: text.slice(2, 6).join(' | '),
       });
     }
-    let parsed;
-    try { parsed = JSON.parse(summary.text); } catch { return res.status(502).json({ error: 'reonomy_parse_error', body: summary.text.slice(0, 400) }); }
+
     return res.json({
       workflow: 'R1-fast',
-      module: 'reonomy saved-search intercept',
+      module: 'reonomy saved-search (scrapingbee)',
       search_uuid: uuid,
-      raw_top_keys: Object.keys(parsed || {}),
-      preview: JSON.stringify(parsed).slice(0, 4000),
+      count: rows.length,
+      rows,
+      html_len: html.length,
+      preview: rows.length === 0 ? html.slice(0, 800) : undefined,
     });
   } catch (err) {
     console.error('R1-fast error:', err);
-    res.status(500).json({ error: 'reonomy_saved_search_failed', message: err.message });
-  } finally {
-    await page.close().catch(() => {});
+    return res.status(500).json({ error: 'reonomy_saved_search_failed', message: err.message });
   }
 }
+
 
 module.exports = { propertyList, ownerDetail, savedSearch, ensureLogin };
