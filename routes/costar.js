@@ -23,26 +23,27 @@ const URLS = {
 
 // --- login helper ---
 // Alex's account has NO 2FA. Cached session persists via Render Disk.
-// Interactive login is `POST /admin/login/costar` — this ensureLogin just verifies.
-async function ensureLogin(page) {
-  await page.goto(`${COSTAR_BASE}/`, { waitUntil: 'domcontentloaded' });
-  await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {});
+// Interactive login is `POST /admin/login/costar` — this ensureLogin verifies
+// by navigating to the target app URL and checking we didn't get bounced to login.
+// Caller passes the actual app URL it wants to end up on (e.g. URLS.ownersCompanies).
+async function ensureLogin(page, targetUrl = URLS.ownersCompanies) {
+  await page.goto(targetUrl, { waitUntil: 'domcontentloaded' });
+  await page.waitForLoadState('networkidle', { timeout: 45000 }).catch(() => {});
   await humanDelay();
-  // Real signed-in indicators — captured from live DOM:
-  //   1. Owners tab exists in top nav (only visible when authenticated)
-  //   2. "Add a Listing" button in top right
-  //   3. URL doesn't include /login or secure.costargroup.com
   const url = page.url();
   if (url.includes('/login') || url.includes('secure.costargroup.com')) {
     throw new Error(
       `CoStar session expired (landed on ${url}). Run POST /admin/login/costar to refresh.`,
     );
   }
-  const signedIn = await page.$('button.csg-tui-tab, [data-testid="search-page"]');
-  if (signedIn) return true;
-  throw new Error(
-    `CoStar session unclear at ${url}. Run POST /admin/login/costar to refresh.`,
-  );
+  // If we landed on the marketing home /, the session isn't good enough for app routes.
+  // (product.costar.com/ has no app chrome, product.costar.com/suiteapps/... does.)
+  if (url === `${COSTAR_BASE}/` || url === COSTAR_BASE) {
+    throw new Error(
+      `CoStar redirected to marketing homepage (session insufficient). Run POST /admin/login/costar.`,
+    );
+  }
+  return true;
 }
 
 // Helper: consume one export credit from the monthly cap and enforce delays.
@@ -194,9 +195,8 @@ async function ownerSearch(req, res) {
 
   const page = await newPage('costar');
   try {
-    await ensureLogin(page);
-    await page.goto(URLS.ownersCompanies, { waitUntil: 'domcontentloaded' });
-    await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {});
+    // ensureLogin navigates to the target URL and verifies we're authenticated
+    await ensureLogin(page, URLS.ownersCompanies);
     await humanDelay(1500, 2500);
 
     // Wait for results table to render (CSG table)
