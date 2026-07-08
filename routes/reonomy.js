@@ -335,9 +335,7 @@ async function savedSearch(req, res) {
   const gate = tryConsume('reonomy');
   if (!gate.ok) return res.status(429).json({ error: 'rate_limited', ...gate });
   const b = req.body || {};
-  const uuid = b.search_uuid;
   const limit = Number(b.limit) || 25;
-  if (!uuid) return res.status(400).json({ error: 'search_uuid required' });
 
   try {
     const key = process.env.SCRAPINGBEE_API_KEY;
@@ -345,33 +343,43 @@ async function savedSearch(req, res) {
     const path = require('path');
     const fs = require('fs');
     const SESSIONS_DIR = process.env.SESSIONS_DIR || '/app/sessions';
-    let cookies = '';
+    let extra = {};
     try {
-      const raw = fs.readFileSync(path.join(SESSIONS_DIR, 'reonomy.storage.json'), 'utf8');
-      const parsed = JSON.parse(raw);
-      cookies = (parsed.cookies || [])
-        .filter((c) => c.name && c.value)
-        .map((c) => `${c.name}=${c.value}`)
-        .join('; ');
+      const hf = path.join(SESSIONS_DIR, 'reonomy.headers.json');
+      if (fs.existsSync(hf)) extra = JSON.parse(fs.readFileSync(hf, 'utf8'));
     } catch {}
+    const jwt = extra['Authorization'] || '';
 
-    const targetUrl = `${REONOMY_BASE}/!/search/${uuid}`;
+    // Reonomy REST API - no Akamai, straightforward with JWT
+    const searchBody = b.body || {
+      filters: {
+        property_types: b.property_types || ['warehouse'],
+        building_area: b.min_size_sf ? { gte: Number(b.min_size_sf) } : { gte: 15000 },
+      },
+      pagination: { page: 1, size: limit },
+    };
     const params = new URLSearchParams({
       api_key: key,
-      url: targetUrl,
-      stealth_proxy: 'true',
+      url: 'https://api.reonomy.com/v2/properties/search',
+      premium_proxy: 'true',
       country_code: 'us',
-      render_js: 'true',
-      wait_browser: 'networkidle2',
-      wait: '5000',
-      return_page_source: 'true',
+      render_js: 'false',
+      forward_headers: 'true',
+      forward_headers_pure: 'true',
     });
-    if (cookies) params.set('cookies', cookies);
+    const headers = {
+      'Content-Type': 'application/json',
+      'Spb-Content-Type': 'application/json',
+      'Spb-Accept': 'application/json',
+      'Spb-Origin': 'https://app.reonomy.com',
+      'Spb-Referer': 'https://app.reonomy.com/',
+    };
+    if (jwt) headers['Spb-Authorization'] = jwt;
 
     const https = require('https');
     const r = await new Promise((resolve, reject) => {
-      const req = https.get('https://app.scrapingbee.com/api/v1/?' + params.toString(),
-        { timeout: 120000 },
+      const req = https.request('https://app.scrapingbee.com/api/v1/?' + params.toString(),
+        { method: 'POST', headers, timeout: 90000 },
         (resp) => {
           let text = '';
           resp.on('data', (c) => text += c);
@@ -379,35 +387,21 @@ async function savedSearch(req, res) {
         });
       req.on('error', reject);
       req.on('timeout', () => req.destroy(new Error('timeout')));
+      req.write(JSON.stringify(searchBody));
+      req.end();
     });
 
     if (r.status !== 200) {
       return res.status(502).json({ error: 'reonomy_scrapingbee_error', status: r.status, body: (r.text || '').slice(0, 800) });
     }
-
-    // Extract MUI Card property cards from rendered HTML.
-    // Each card contains: address, size, sale info, owner name.
-    const html = r.text;
-    const cardMatches = html.match(/<div[^>]*class="[^"]*MuiPaper-root[^"]*MuiCard-root[^"]*"[^>]*>[\s\S]*?<\/div>\s*<\/div>/g) || [];
-    const rows = [];
-    for (const card of cardMatches.slice(0, limit)) {
-      const text = card.replace(/<[^>]+>/g, '\n').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').split('\n').map(l => l.trim()).filter(Boolean);
-      if (text.length < 3) continue;
-      rows.push({
-        address: text[0] || '',
-        size_line: text[1] || '',
-        detail: text.slice(2, 6).join(' | '),
-      });
-    }
-
+    let parsed;
+    try { parsed = JSON.parse(r.text); } catch { return res.status(502).json({ error: 'reonomy_parse_error', body: r.text.slice(0, 400) }); }
     return res.json({
       workflow: 'R1-fast',
-      module: 'reonomy saved-search (scrapingbee)',
-      search_uuid: uuid,
-      count: rows.length,
-      rows,
-      html_len: html.length,
-      preview: rows.length === 0 ? html.slice(0, 800) : undefined,
+      module: 'reonomy REST API via ScrapingBee',
+      raw_top_keys: Object.keys(parsed || {}),
+      count: (parsed.properties || parsed.results || parsed.data || []).length,
+      preview: JSON.stringify(parsed).slice(0, 4000),
     });
   } catch (err) {
     console.error('R1-fast error:', err);
