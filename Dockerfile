@@ -4,12 +4,13 @@ FROM mcr.microsoft.com/playwright:v1.61.1-jammy
 
 WORKDIR /app
 
-# Copy manifest and install deps
-# Install koffi + impers first with postinstall enabled (koffi ships native prebuilt binaries)
-# Then install the rest without postinstall (skips playwright's Chromium download since the base image has it)
+# Copy manifest and install deps.
+# 1) First install everything --ignore-scripts (skips playwright's Chromium download since the base image has it)
+# 2) Then RE-install koffi+impers with scripts enabled so koffi's native module builds/downloads properly.
 COPY package.json ./
-RUN npm install koffi impers --no-save
 RUN npm install --omit=optional --ignore-scripts
+RUN npm rebuild koffi
+RUN npm install koffi impers --force
 
 # Copy source
 COPY . .
